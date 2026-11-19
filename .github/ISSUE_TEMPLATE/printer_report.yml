@@ -1,0 +1,34 @@
+name: Printer report (it works / it doesn't)
+description: Tell us how ArcLayer prints on your printer, so it can be added to the tested list
+labels: [printer-report]
+body:
+  - type: input
+    id: printer
+    attributes:
+      label: Printer, nozzle and firmware
+      placeholder: e.g. Prusa MK4S, 0.4 mm, firmware 6.2
+    validations:
+      required: true
+  - type: dropdown
+    id: result
+    attributes:
+      label: How did it go?
+      options: [Printed well, Printed with problems, Did not print]
+    validations:
+      required: true
+  - type: dropdown
+    id: mode
+    attributes:
+      label: Curved-layer mode
+      multiple: true
+      options: [Follow the top surface, Conical, Flat]
+  - type: dropdown
+    id: send
+    attributes:
+      label: How did you send the print?
+      options: [Straight from ArcLayer (network), Exported G-code file, Exported .3mf]
+  - type: textarea
+    id: notes
+    attributes:
+      label: Notes and photos
+      description: Anything odd (start G-code, first layer, toolhead touching the print). Photos welcome.

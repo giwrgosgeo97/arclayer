@@ -1,0 +1,43 @@
+name: Bug report
+description: Something went wrong while slicing, printing or using the app
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting! The quickest way: in ArcLayer, **File → Report a problem** makes a zip with the log and settings (private details removed). Attach it below.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: And what did you expect instead?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to make it happen again
+      placeholder: "1. Load model …\n2. Mode: Follow the top surface\n3. Slice → error …"
+  - type: input
+    id: printer
+    attributes:
+      label: Printer and nozzle
+      placeholder: e.g. Bambu Lab A1, 0.4 mm
+    validations:
+      required: true
+  - type: dropdown
+    id: mode
+    attributes:
+      label: Curved-layer mode
+      options: [Follow the top surface, Conical, Flat, Not sure]
+  - type: input
+    id: version
+    attributes:
+      label: ArcLayer version
+      description: File → About, or the installer name
+      placeholder: "0.8.4"
+  - type: textarea
+    id: files
+    attributes:
+      label: Report zip, model, photos
+      description: Drag files here. Photos of a failed print help a lot.

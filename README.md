@@ -22,7 +22,7 @@ Normal slicers cut a model into flat layers. ArcLayer bends them:
 
 The rest of a modern slicer is there too: an Orca-style interface, presets for **100+ printers** with their makers' own start G-code, multi-colour (AMS, CFS and M600 filament changes), tree and normal supports, 16 infill patterns, calibration prints, print by object with collision warnings, auto arrange, and sending straight to Bambu Lab, Prusa, Klipper/Moonraker and OctoPrint printers with a live camera view.
 
-![Partway through the curved layers](docs/screenshot-layers.jpg)
+![The layers building up: the last ones follow the curved top](docs/layers.gif)
 
 **Status:** experimental and free. Tested with real prints on a Bambu Lab A1. The other printers are set up from their makers' profiles but have had less real-world testing, so watch the first layers. See [DISCLAIMER.md](DISCLAIMER.md). For problems and ideas, use File → **Report a problem** in the app, or open an issue here.
 
