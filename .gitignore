@@ -30,3 +30,6 @@ printer_images/
 # private: supporter code keys (bundled into the app by build_installer.py)
 app/supporter_key.txt
 update_check.json
+
+# launch drafts (not part of the app)
+launch/
