@@ -1,0 +1,454 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ArcLayer</title>
+<link rel="icon" href="logo.svg">
+<link rel="stylesheet" href="style.css">
+<script type="importmap">{"imports":{"three":"./vendor/three.module.js","three/addons/":"./vendor/addons/"}}</script>
+</head>
+<body>
+<header id="topbar">
+  <div class="brand"><img class="logo" src="logo.svg" alt=""><span><span class="brand-arc">Arc</span>Layer</span></div>
+  <button id="btn-file" class="menubtn" title="New, open, save, import and export (Ctrl+N / O / S / I)">File ▾</button>
+  <button id="btn-calib" class="menubtn" title="Calibration prints: temperature, flow, pressure advance, retraction…">Calibration ▾</button>
+  <span id="project-name" class="project-name" title=""></span>
+  <nav id="tabs">
+    <button data-view="prepare" class="active">Prepare</button>
+    <button data-view="preview">Preview</button>
+    <button data-view="device">Device</button>
+  </nav>
+  <div class="top-actions">
+    <button id="help-fab" class="help-fab" title="Ask the ArcLayer helper: settings, calibrations, problems">💬 Help</button>
+    <button id="btn-donate" class="donate" hidden title="Like the slicer? Buy the developer a coffee">☕ Support</button>
+    <button id="btn-slice" class="primary">Slice plate</button>
+    <div class="split">
+      <button id="btn-print" class="primary" disabled>Print plate</button>
+      <button id="btn-export" disabled>Export</button>
+    </div>
+  </div>
+</header>
+
+<div id="main">
+  <aside id="sidebar">
+    <section class="card">
+      <div class="card-head"><span>Printer</span>
+        <span class="icons">
+          <button class="icon" id="printer-choose" title="Add or remove printers in this list">☰</button>
+          <button class="icon" id="printer-edit" title="Edit printer settings">⚙</button>
+        </span></div>
+      <select id="printer-select"></select>
+      <label class="plate-row" title="The build plate on the printer: sets the bed temperature and the printer's plate check">
+        <span>Plate</span><select id="plate-select"></select></label>
+    </section>
+
+    <section class="card">
+      <div class="card-head"><span>Filament</span>
+        <span class="icons">
+          <button class="icon text" id="ams-sync" title="Load the filaments and colours loaded in the AMS lite">⟳ AMS</button>
+          <button class="icon" id="filament-choose" title="Add or remove filaments in the lists">☰</button>
+          <button class="icon" id="filament-add" title="Add a filament slot (AMS lite: up to 4)">＋</button>
+          <button class="icon" id="filament-edit" title="Edit the selected filament's settings">⚙</button>
+        </span></div>
+      <div id="filament-slots"></div>
+    </section>
+
+    <section class="card grow">
+      <div class="card-head"><span>Process</span>
+        <span class="icons">
+          <label class="adv-toggle" title="Show every setting (Orca's Advanced mode)"><input type="checkbox" id="adv-toggle"> Advanced</label>
+          <button class="icon" id="process-reset" title="Reset: undo unsaved changes, or restore the factory defaults">↺</button>
+          <button class="icon" id="process-save" title="Save changes to this preset">💾</button>
+          <button class="icon" id="process-saveas" title="Save as a new preset">⎘</button>
+          <button class="icon" id="process-delete" title="Delete this preset">🗑</button>
+        </span></div>
+      <select id="process-select"></select>
+      <div id="process-tabs" class="subtabs"></div>
+      <div id="process-form" class="form"></div>
+    </section>
+
+    <section id="slice-status" class="card hidden">
+      <div class="progress"><div id="progress-bar"></div></div>
+      <div id="progress-text"></div>
+      <details><summary>Log</summary><pre id="log"></pre></details>
+    </section>
+  </aside>
+
+  <section id="stage">
+    <div id="canvas-wrap"></div>
+
+    <!-- Prepare overlays -->
+    <div id="plate-toolbar" class="overlay toolbar view-prepare">
+      <button id="btn-import" title="Import an STL / OBJ / 3MF">⤓ Import</button>
+      <span class="sep"></span>
+      <label>X <input id="obj-x" type="number" step="1"></label>
+      <label>Y <input id="obj-y" type="number" step="1"></label>
+      <label>Scale <input id="obj-scale" type="number" step="5" value="100"> %</label>
+      <label>Rotate <input id="obj-rot" type="number" step="15" value="0"> °</label>
+      <button id="btn-center" title="Centre on the plate">⌖ Center</button>
+      <button id="btn-arrange" title="Arrange (A): spread the parts over the plate. Printing by object, they get the toolhead clearance between them">⊞ Arrange</button>
+      <button id="btn-remove" title="Remove the model">✕</button>
+      <input id="file-model" type="file" accept=".stl,.obj,.3mf,.ply" hidden>
+    </div>
+    <div id="gizmo-bar" class="overlay gizmo-bar view-prepare">
+      <button data-tool="move" title="Move (M): drag the arrows on the plate">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v18M3 12h18M12 3l-3 3M12 3l3 3M12 21l-3-3M12 21l3-3M3 12l3-3M3 12l3 3M21 12l-3-3M21 12l-3 3"/></svg><span>Move</span></button>
+      <button data-tool="rotate" title="Rotate (R): drag the rings, or turn 90°">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M20 12a8 8 0 1 1-2.6-5.9"/><path d="M20 4v5h-5"/></svg><span>Rotate</span></button>
+      <button data-tool="scale" title="Scale (S): percent or size in mm">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="13.5" width="7" height="7" rx="1"/><path d="M11 13l9-9M14 4h6v6"/></svg><span>Scale</span></button>
+      <button data-tool="layflat" title="Lay on face (F): click a flat face to put it on the plate">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M6.5 16L12 6.5l5.5 9.5z"/><path d="M3 20h18"/></svg><span>Lay on face</span></button>
+      <span class="gsep"></span>
+      <button data-tool="paint" title="Paint support (L): green adds support, red blocks it">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M14.5 4.5l5 5-7.5 7.5-5-5z"/><path d="M7 12l-2.2 2.2c-1.3 1.3-.8 3.6-2.3 4.8 2.2.9 4.7.6 6-.7L10.7 16"/></svg><span>Supports</span></button>
+    </div>
+    <div id="gizmo-panel" class="overlay gizmo-panel view-prepare hidden"></div>
+    <div id="object-info" class="overlay info view-prepare"></div>
+    <div id="objects" class="overlay objects view-prepare hidden"></div>
+    <div id="empty-hint" class="overlay hint view-prepare">
+      <div class="big">Drop a model here</div>
+      <div>or click <b>Import</b>. STL, OBJ, 3MF</div>
+    </div>
+
+    <!-- Preview overlays -->
+    <div id="legend" class="overlay legend view-preview"></div>
+    <div id="layer-slider" class="overlay view-preview">
+      <div id="layer-top-label"></div>
+      <input id="layer-range" type="range" orient="vertical" min="1" value="1">
+      <label class="tiny"><input type="checkbox" id="single-layer"> single</label>
+      <button id="add-change" class="tiny-btn" title="Change filament from this layer up (AMS)">＋ colour</button>
+    </div>
+    <div id="move-slider" class="overlay view-preview hidden">
+      <button id="move-play" class="tiny-btn" title="Play this layer (Space)">▶</button>
+      <input id="move-range" type="range" min="0" value="0" title="Moves in this layer (← →, Shift for 10)">
+      <label class="tiny" title="Show the nozzle and heater block (sizes from Printer settings → Toolhead clearance)"><input type="checkbox" id="show-head"> toolhead</label>
+      <div id="move-label"></div>
+    </div>
+    <button id="sim-btn" class="overlay view-preview sim-btn hidden" title="Play the whole print from the first layer to the last">▶ Simulate print</button>
+    <div id="sim-bar" class="overlay view-preview sim-bar hidden">
+      <button id="sim-play" class="sim-play" title="Play / pause (Space)">❚❚</button>
+      <div class="sim-mid">
+        <input id="sim-range" type="range" min="0" max="1000" value="0" title="Drag to jump anywhere in the print">
+        <div class="sim-info"><span id="sim-time">0m / 0m</span><span id="sim-where"></span></div>
+      </div>
+      <select id="sim-speed" title="Simulation speed">
+        <option value="1">1×</option><option value="10">10×</option><option value="50">50×</option>
+        <option value="200" selected>200×</option><option value="1000">1000×</option><option value="5000">5000×</option>
+      </select>
+      <label class="tiny sim-follow" title="Camera follows the nozzle"><input type="checkbox" id="sim-follow"> follow</label>
+      <button id="sim-close" class="sim-close" title="Stop the simulation">✕</button>
+    </div>
+    <div id="live-bar" class="overlay view-preview live-bar hidden">
+      <span class="live-dot">● LIVE</span>
+      <div class="live-mid"><div id="live-text"></div><div class="progress"><div id="live-progress"></div></div><div id="live-where" class="muted small"></div></div>
+      <select id="live-cam" class="tiny live-cam-pick" title="Show a camera next to the live view">
+        <option value="">No camera</option><option value="printer">Printer camera</option><option value="extra">My camera</option>
+      </select>
+      <label class="tiny" title="Camera follows the nozzle"><input type="checkbox" id="live-follow"> follow</label>
+      <button id="live-close" class="sim-close" title="Leave the live view">✕</button>
+      <img id="live-cam-img" class="live-cam hidden" alt="Printer camera">
+    </div>
+    <div id="calib-panel" class="overlay calib-panel hidden"></div>
+    <div id="preview-empty" class="overlay hint view-preview"><div class="big">Nothing sliced yet</div><div>Press <b>Slice plate</b></div></div>
+
+    <!-- Device view -->
+    <div id="device-view" class="view-device">
+      <div class="device-card">
+        <h2>Device</h2>
+        <div class="row"><span id="dev-printer-name"></span><span id="dev-conn" class="pill">Disconnected</span></div>
+        <div class="row gap">
+          <button id="dev-connect" class="primary">Connect</button>
+          <button id="dev-disconnect">Disconnect</button>
+          <button id="dev-settings">Connection settings</button>
+        </div>
+        <div id="dev-printers" class="dev-printers"></div>
+        <p class="muted small" id="dev-hint">Fill in the IP address, serial number and access code under
+          Printer settings → Connection (Bambu, or Klipper / OctoPrint / PrusaLink with the printer's address). The printer must be on the same network. On newer firmware,
+          turn on <b>LAN Only</b> and <b>Developer Mode</b> on the printer.
+          <b>Several printers</b> (two A1s…): make a printer preset for each one (⚙ → Save as…, e.g. “A1 #2”) with its
+          own IP, serial and access code, pick it and press Connect. They stay connected; click one above to show it.</p>
+      </div>
+      <div class="device-grid">
+        <div class="device-card send-card">
+          <h3>Send print</h3>
+          <div id="dev-map" class="dev-map bambu-only"></div>
+          <div class="bambu-only">
+          <label class="check" title="Leave it off to use the mesh the printer measured last time (same plate, not moved)"><input type="checkbox" id="opt-level" data-opt="bed_leveling" checked> Bed levelling</label>
+          <label class="check"><input type="checkbox" id="opt-timelapse" data-opt="timelapse"> Timelapse</label>
+          <label class="check" title="The printer measures pressure advance (K) for this filament before printing. Do it once per filament, then turn it off: the printer keeps the value"><input type="checkbox" id="opt-flowcali" data-opt="flow_cali"> Flow dynamics calibration</label>
+          <label class="check" title="The printer measures its vibration and sets input shaping. Do it once after moving the printer, then turn it off: the printer keeps the result"><input type="checkbox" id="opt-vibcali" data-opt="vibration_cali"> Vibration compensation</label>
+          <label class="check" title="Skips the start-up tune and the motor noise check (the printer uses its saved values). Built-in A1 start only"><input type="checkbox" id="opt-quick" data-opt="quick_start"> Quick start</label>
+          </div>
+          <button id="dev-send" class="primary">Upload &amp; print the sliced plate</button>
+          <p class="muted small">Needs a sliced plate. Works with every Bambu printer, no template needed.</p>
+        </div>
+        <div class="device-card">
+          <h3 class="job-head">Job <span class="job-sep">–</span> <span id="dev-job">–</span></h3>
+          <div id="dev-job-name" class="muted small job-name"></div>
+          <div class="progress"><div id="dev-progress"></div></div>
+          <div class="row muted small"><span id="dev-layer">Layer –</span><span id="dev-remaining">–</span></div>
+          <div class="row gap">
+            <button data-cmd="pause">Pause</button>
+            <button data-cmd="resume">Resume</button>
+            <button data-cmd="stop" class="danger">Stop</button>
+          </div>
+          <button id="dev-live" class="live-btn" title="Watch the print in 3D: what is printed so far and the line being printed now">👁 Live view</button>
+          <div class="speed-row" title="Print speed, like the speed button on the printer">
+            <span class="muted small">Speed</span>
+            <div class="seg" id="dev-speed">
+              <button data-lvl="1">Silent</button><button data-lvl="2">Standard</button>
+              <button data-lvl="3">Sport</button><button data-lvl="4">Ludicrous</button>
+            </div>
+          </div>
+        </div>
+        <div class="device-card">
+          <h3>Temperatures</h3>
+          <div class="temp"><span>Nozzle</span><b id="dev-nozzle">–</b></div>
+          <div class="temp-set" data-what="nozzle"><button data-d="-5">−5</button><button data-d="-1">−1</button><input type="number" min="0" max="300" step="1" placeholder="°C" title="Type a temperature and press Enter"><button data-d="1">+1</button><button data-d="5">+5</button><button class="primary sm" data-set>Set</button></div>
+          <div class="temp"><span>Bed</span><b id="dev-bed">–</b></div>
+          <div class="temp-set" data-what="bed"><button data-d="-5">−5</button><button data-d="-1">−1</button><input type="number" min="0" max="110" step="1" placeholder="°C" title="Type a temperature and press Enter"><button data-d="1">+1</button><button data-d="5">+5</button><button class="primary sm" data-set>Set</button></div>
+          <div class="row gap"><button data-cmd="light_on">Light on</button><button data-cmd="light_off">Light off</button></div>
+        </div>
+        <div class="device-card cam-card">
+          <h3>Cameras</h3>
+          <div class="cam-row">
+            <label class="switch"><input type="checkbox" id="cam-printer-on"><span></span> Printer camera</label>
+            <label class="switch"><input type="checkbox" id="cam-extra-on"><span></span> My camera</label>
+            <button class="sm" id="cam-extra-setup" title="Add your own camera (Tapo or any RTSP / HTTP camera)">⚙ Set up</button>
+          </div>
+          <div class="cams">
+            <div class="cam hidden" id="cam-printer"><img alt="Printer camera"><span class="cam-msg"></span><span class="cam-tag">Printer</span>
+              <button class="cam-full" title="Full screen (double-click the picture too)">⛶</button></div>
+            <div class="cam hidden" id="cam-extra"><img alt="My camera"><span class="cam-msg"></span><span class="cam-tag">My camera</span>
+              <button class="cam-full" title="Full screen (double-click the picture too)">⛶</button></div>
+          </div>
+          <div class="cam-setup hidden" id="cam-form">
+            <div class="seg cam-kind"><button data-kind="tapo" class="on">Tapo camera</button><button data-kind="url">Other camera</button></div>
+            <div id="cam-tapo">
+              <ol class="cam-steps small">
+                <li>In the <b>Tapo app</b>, tap the camera, then <b>⚙ Settings → Advanced Settings → Camera Account</b>.
+                  Make a user name and password there. This is a login only for the camera (not your Tapo account, and not <i>Share</i>).</li>
+                <li>Newer Tapo firmware: also turn on <b>Me → Tapo Lab → Third-Party Compatibility</b>.</li>
+                <li>Fill in below and press <b>Test</b>.</li>
+              </ol>
+              <label class="cam-field"><span>Camera IP</span>
+                <span class="row gap"><input type="text" id="cam-ip" spellcheck="false" placeholder="192.168.1.50"><button class="sm" id="cam-find" title="Search this network for cameras">🔍 Find</button></span></label>
+              <div id="cam-found" class="cam-found"></div>
+              <label class="cam-field"><span>User name</span><input type="text" id="cam-user" spellcheck="false" autocomplete="off"></label>
+              <label class="cam-field"><span>Password</span><input type="password" id="cam-pass" autocomplete="new-password"></label>
+              <label class="cam-field"><span>Picture</span><select id="cam-q"><option value="stream1">HD (stream1)</option><option value="stream2">Light (stream2)</option></select></label>
+            </div>
+            <div id="cam-other" class="hidden">
+              <label class="muted small" for="cam-url">Camera address (RTSP or HTTP)</label>
+              <input type="text" id="cam-url" spellcheck="false" placeholder="rtsp://user:password@192.168.0.50:554/stream1">
+            </div>
+            <div id="cam-test-msg" class="muted small"></div>
+            <p class="muted small">Stays on this computer.</p>
+            <div class="row gap"><button class="sm" id="cam-test">Test</button><button class="primary sm" id="cam-save">Save</button><button class="sm" id="cam-cancel">Cancel</button></div>
+          </div>
+        </div>
+        <div class="device-card bambu-only">
+          <h3>AMS lite</h3>
+          <div id="dev-ams" class="ams-grid"><span class="muted small">Connect to see the loaded filaments</span></div>
+          <button id="dev-ams-sync">Use these filaments</button>
+          <div class="runout">
+            <label class="muted small" for="runout-mode">When a spool runs out</label>
+            <select id="runout-mode">
+              <option value="pause">Pause and wait for me</option>
+              <option value="printer">Printer's auto refill (same filament, printer picks the slot)</option>
+              <option value="order">Switch slots in my order</option>
+            </select>
+            <div id="runout-order-row" class="runout-order hidden">
+              <div class="muted small">Tap the slots in the order to use them:</div>
+              <div id="runout-slots" class="runout-slots"></div>
+              <div class="runout-seq"><span id="runout-seq"></span>
+                <button class="sm" id="runout-clear" title="Start the order again">Clear</button>
+                <button class="sm primary" id="runout-save">Save</button></div>
+              <input id="runout-order" type="hidden">
+            </div>
+            <p class="muted small" id="runout-note"></p>
+            <div id="runout-events" class="muted small"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+</div>
+
+<!-- Preset editor -->
+<div id="modal" class="modal hidden">
+  <div class="modal-box">
+    <div class="modal-head">
+      <span id="modal-title"></span>
+      <select id="modal-preset"></select>
+      <button class="icon" id="modal-close">✕</button>
+    </div>
+    <div class="modal-body">
+      <nav id="modal-tabs" class="vtabs"></nav>
+      <div id="modal-form" class="form"></div>
+    </div>
+    <div class="modal-foot">
+      <button id="modal-delete" class="danger">Delete</button>
+      <button id="modal-reset" title="Undo all unsaved changes">Reset changes</button>
+      <button id="modal-restore" title="Put this built-in preset back to its factory values">Restore defaults</button>
+      <span class="grow"></span>
+      <button id="modal-saveas">Save as…</button>
+      <button id="modal-save" class="primary">Save</button>
+    </div>
+  </div>
+</div>
+
+<div id="toast"></div>
+<div id="palette" class="palette hidden"></div>
+<div id="menu" class="menu hidden"></div>
+
+<div id="update-bar" class="update-bar hidden"><span id="update-text"></span>
+  <button class="primary sm" id="update-get">Download</button><button class="sm" id="update-later">Later</button></div>
+
+<!-- Report a problem -->
+<div id="report" class="modal hidden">
+  <div class="modal-box report-box">
+    <div class="modal-head"><span>Report a problem</span><button class="icon" id="report-close">✕</button></div>
+    <div class="report-body">
+      <label class="muted small" for="report-what">What happened? (what you did, what went wrong)</label>
+      <textarea id="report-what" rows="5" placeholder="e.g. I sliced the wavy cup in surface mode and the top layers came out flat"></textarea>
+      <label class="muted small" for="report-expected">What did you expect? (optional)</label>
+      <textarea id="report-expected" rows="2"></textarea>
+      <label class="check"><input type="checkbox" id="report-log" checked> The last part of the app log</label>
+      <label class="check"><input type="checkbox" id="report-settings" checked> The printer, filament and process settings in use</label>
+      <label class="check"><input type="checkbox" id="report-pic" checked> A picture of the plate</label>
+      <p class="muted small">Private details are always removed first: IP addresses, serial numbers, access codes,
+        passwords, camera logins, e-mail addresses and your Windows user name. ArcLayer sends nothing by itself:
+        it makes a small .zip and opens a new email in your mail app, so you see everything before you send it.</p>
+      <div id="report-done" class="report-done hidden"></div>
+    </div>
+    <div class="modal-foot"><span></span><button id="report-cancel">Cancel</button><button id="report-go" class="primary">Make the report</button></div>
+  </div>
+</div>
+
+<!-- First-start intro -->
+<div id="intro" class="intro hidden">
+  <div class="intro-card">
+    <button class="intro-skip" id="intro-skip">Skip</button>
+    <div id="intro-art" class="intro-art-box"></div>
+    <h2 id="intro-title"></h2>
+    <p id="intro-text"></p>
+    <div class="intro-foot">
+      <button id="intro-back" class="ghost">Back</button>
+      <div id="intro-dots" class="intro-dots"></div>
+      <button id="intro-next" class="primary">Next</button>
+    </div>
+  </div>
+</div>
+
+<!-- Helper: answers questions about the app (works offline) -->
+<div id="help-panel" class="help-panel hidden">
+  <div class="help-head"><img src="logo.svg" alt=""><b>ArcLayer helper</b><span class="muted small">works offline</span>
+    <button class="icon" id="help-close" title="Close">✕</button></div>
+  <div id="help-log" class="help-log"></div>
+  <form id="help-form" class="help-form"><input id="help-input" type="text" autocomplete="off" spellcheck="false"
+    placeholder="Ask anything… e.g. why is my print stringing?"><button class="primary sm" type="submit">Ask</button></form>
+</div>
+<input id="file-template" type="file" accept=".3mf" hidden>
+<input id="file-project" type="file" accept=".3mf,.stl,.obj,.ply" hidden>
+
+<!-- Calibration settings -->
+<div id="calib-modal" class="modal hidden">
+  <div class="ask-box calib-box">
+    <div class="ask-title" id="calib-title"></div>
+    <div class="ask-text" id="calib-about"></div>
+    <div id="calib-form"></div>
+    <div class="ask-btns" id="calib-btns"></div>
+  </div>
+</div>
+
+<!-- Save changes? -->
+<div id="nag" class="nag-wrap hidden">
+  <div class="nag-box" role="dialog" aria-labelledby="nag-title">
+    <button class="nag-x" id="nag-x" title="Close">✕</button>
+    <div class="nag-hero">
+      <div class="nag-cup">☕</div>
+      <div>
+        <div class="nag-title" id="nag-title">Keep ArcLayer free</div>
+        <div class="nag-sub">Made by one person, in their spare time, for everyone.</div>
+      </div>
+    </div>
+    <div class="nag-main" id="nag-main">
+      <p>ArcLayer is free: no ads, no account, no paid version. Curved-layer slicing used to need
+        scripts and hacks; the goal is to make it one click for every printer.</p>
+      <div class="nag-why">
+        <div><b>🧵 Test filament and prints</b><span>Every feature is tested on real printers, and that uses a lot of plastic.</span></div>
+        <div><b>🖨️ More printers</b><span>Support for new printers and toolheads, so you can print curved layers on yours.</span></div>
+        <div><b>🛠️ Faster fixes</b><span>More time for bugs you report and features you ask for.</span></div>
+        <div><b>💚 It stays free</b><span>Supporters keep it free for students, makers and everyone else.</span></div>
+      </div>
+      <p class="nag-small">Any amount helps, even one coffee. After you donate, Ko-fi gives you a supporter code: enter it here and
+        this window won't show again.</p>
+    </div>
+    <div class="nag-actions">
+      <button class="nag-go" id="nag-go">☕ Support on Ko-fi</button>
+      <a href="#" class="nag-already" id="nag-already">I'm a supporter: enter my code</a>
+    </div>
+    <form class="nag-code hidden" id="nag-code">
+      <input id="nag-code-in" placeholder="NPS-XXXX-XXXX-XXXX-XXXX" spellcheck="false" autocomplete="off">
+      <button type="submit" class="nag-go">Unlock</button>
+      <div class="nag-err" id="nag-err"></div>
+      <div class="nag-hint">The code is in the thank-you message Ko-fi shows (and emails you) after you donate.</div>
+    </form>
+  </div>
+</div>
+<div id="chooser" class="chooser-wrap hidden">
+  <div class="chooser-box" role="dialog" aria-labelledby="chooser-title">
+    <button class="nag-x" id="chooser-x" title="Close">✕</button>
+    <div class="chooser-top">
+      <div class="chooser-title" id="chooser-title">Printers & filaments</div>
+      <div class="chooser-sub" id="chooser-sub"></div>
+      <div class="chooser-bar">
+        <div class="chooser-steps" id="chooser-steps"><span data-step="printer">1 · Printers</span><span data-step="filament">2 · Filaments</span></div>
+        <input id="chooser-search" type="search" placeholder="Search…" autocomplete="off">
+        <button class="sm" id="chooser-all" title="Tick everything shown">Select all</button>
+        <button class="sm" id="chooser-none" title="Untick everything shown">Clear</button>
+      </div>
+    </div>
+    <div class="chooser-body">
+      <div class="chooser-brands" id="chooser-brands"></div>
+      <div class="chooser-grid" id="chooser-grid"></div>
+    </div>
+    <div class="chooser-foot">
+      <span id="chooser-count"></span>
+      <span class="grow"></span>
+      <button id="chooser-cancel">Cancel</button>
+      <button id="chooser-back">‹ Back</button>
+      <button class="primary" id="chooser-next">Next ›</button>
+      <button class="primary" id="chooser-done">Done</button>
+    </div>
+  </div>
+</div>
+<div id="sync-modal" class="modal hidden">
+  <div class="ask-box sync-box">
+    <div class="ask-title">Sync with my other PCs</div>
+    <div class="ask-text">Keeps your printers, filaments, processes and app settings the same on every PC, through a
+      folder your cloud drive already syncs (OneDrive, Google Drive, Dropbox). No account needed: pick the same folder
+      on each PC. The newer change wins; a preset you delete is deleted on the other PCs too.</div>
+    <div id="sync-sugg" class="sync-sugg"></div>
+    <div class="row gap"><input id="sync-dir" type="text" spellcheck="false" placeholder="C:\Users\you\OneDrive">
+      <button class="sm" id="sync-browse">Browse…</button></div>
+    <div id="sync-info" class="muted small"></div>
+    <p class="muted small">Printer connections (IP, access code) and the camera login are synced too, so keep the
+      folder private. The app checks for changes every minute while it is open.</p>
+    <div class="ask-btns"><button id="sync-off">Turn off</button><span class="grow"></span>
+      <button id="sync-close">Close</button><button class="primary" id="sync-save">Sync now</button></div>
+  </div>
+</div>
+<div id="ask" class="modal hidden">
+  <div class="ask-box">
+    <div class="ask-title" id="ask-title"></div>
+    <div class="ask-text" id="ask-text"></div>
+    <div class="ask-btns" id="ask-btns"></div>
+  </div>
+</div>
+<script type="module" src="app.js"></script>
+</body>
+</html>

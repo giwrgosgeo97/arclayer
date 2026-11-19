@@ -1,0 +1,363 @@
+{
+ "_about": "Toolhead clearance for print-by-object, from OrcaSlicer's printer profiles: [radius around the nozzle (mm), height from the nozzle tip to the gantry rod (mm)]. Bambu profiles give no radius: 65 mm (Orca's default) is used.",
+ "Anker AnkerMake M5": [
+  45.0,
+  30.0
+ ],
+ "Anker AnkerMake M5C": [
+  45.0,
+  30.0
+ ],
+ "Anycubic Kobra 2": [
+  65.0,
+  36.0
+ ],
+ "Anycubic Kobra 2 Max": [
+  73.0,
+  25.0
+ ],
+ "Anycubic Kobra 2 Neo": [
+  20.0,
+  20.0
+ ],
+ "Anycubic Kobra 2 Plus": [
+  73.0,
+  25.0
+ ],
+ "Anycubic Kobra 2 Pro": [
+  73.0,
+  25.0
+ ],
+ "Anycubic Kobra 3": [
+  130.0,
+  30.0
+ ],
+ "Anycubic Kobra S1": [
+  60.0,
+  48.0
+ ],
+ "Anycubic Vyper": [
+  65.0,
+  36.0
+ ],
+ "Anycubic i3 Mega S": [
+  65.0,
+  36.0
+ ],
+ "Artillery Genius Pro": [
+  65.0,
+  36.0
+ ],
+ "Artillery Sidewinder X1": [
+  65.0,
+  36.0
+ ],
+ "Artillery Sidewinder X2": [
+  65.0,
+  36.0
+ ],
+ "Artillery Sidewinder X4 Plus": [
+  65.0,
+  36.0
+ ],
+ "Artillery Sidewinder X4 Pro": [
+  65.0,
+  36.0
+ ],
+ "Bambu Lab A1": [
+  65.0,
+  25.0
+ ],
+ "Bambu Lab A1 mini": [
+  65.0,
+  25.0
+ ],
+ "Bambu Lab H2D": [
+  65.0,
+  47.4
+ ],
+ "Bambu Lab P1P": [
+  65.0,
+  34.0
+ ],
+ "Bambu Lab P1S": [
+  65.0,
+  34.0
+ ],
+ "Bambu Lab P2S": [
+  72.0,
+  32.5
+ ],
+ "Bambu Lab X1 Carbon": [
+  65.0,
+  34.0
+ ],
+ "Bambu Lab X1E": [
+  65.0,
+  34.0
+ ],
+ "Creality CR-10": [
+  70.0,
+  33.0
+ ],
+ "Creality CR-10 SE": [
+  65.0,
+  36.0
+ ],
+ "Creality CR-10 Smart Pro": [
+  70.0,
+  33.0
+ ],
+ "Creality CR-10 V3": [
+  47.0,
+  34.0
+ ],
+ "Creality CR-M4": [
+  47.0,
+  34.0
+ ],
+ "Creality Ender-3": [
+  47.0,
+  25.0
+ ],
+ "Creality Ender-3 Max Neo": [
+  60.0,
+  35.0
+ ],
+ "Creality Ender-3 Pro": [
+  47.0,
+  25.0
+ ],
+ "Creality Ender-3 S1": [
+  47.0,
+  34.0
+ ],
+ "Creality Ender-3 S1 Plus": [
+  47.0,
+  34.0
+ ],
+ "Creality Ender-3 S1 Pro": [
+  47.0,
+  34.0
+ ],
+ "Creality Ender-3 V2": [
+  47.0,
+  34.0
+ ],
+ "Creality Ender-3 V2 Neo": [
+  47.0,
+  34.0
+ ],
+ "Creality Ender-3 V3": [
+  70.0,
+  14.0
+ ],
+ "Creality Ender-3 V3 KE": [
+  90.0,
+  47.0
+ ],
+ "Creality Ender-3 V3 Plus": [
+  45.0,
+  45.0
+ ],
+ "Creality Ender-3 V3 SE": [
+  90.0,
+  47.0
+ ],
+ "Creality Ender-5": [
+  47.0,
+  34.0
+ ],
+ "Creality Ender-5 Plus": [
+  47.0,
+  34.0
+ ],
+ "Creality Ender-5 Pro": [
+  47.0,
+  34.0
+ ],
+ "Creality Ender-5 S1": [
+  47.0,
+  34.0
+ ],
+ "Creality Ender-6": [
+  47.0,
+  34.0
+ ],
+ "Creality Hi": [
+  55.0,
+  27.0
+ ],
+ "Creality K1": [
+  65.0,
+  45.0
+ ],
+ "Creality K1 Max": [
+  65.0,
+  45.0
+ ],
+ "Creality K1 SE": [
+  65.0,
+  45.0
+ ],
+ "Creality K1C": [
+  65.0,
+  45.0
+ ],
+ "Creality K2 Plus": [
+  64.0,
+  24.0
+ ],
+ "Flashforge AD5X": [
+  58.0,
+  26.0
+ ],
+ "Flashforge Adventurer 5M": [
+  76.0,
+  27.0
+ ],
+ "Flashforge Adventurer 5M Pro": [
+  76.0,
+  27.0
+ ],
+ "Kingroon KP3S Pro V2": [
+  45.0,
+  25.0
+ ],
+ "Prusa CORE One": [
+  75.0,
+  33.0
+ ],
+ "Prusa MINI+": [
+  65.0,
+  36.0
+ ],
+ "Prusa MK3.5": [
+  65.0,
+  36.0
+ ],
+ "Prusa MK3S+": [
+  65.0,
+  36.0
+ ],
+ "Prusa MK4": [
+  65.0,
+  36.0
+ ],
+ "Prusa MK4S": [
+  45.0,
+  14.0
+ ],
+ "Prusa XL": [
+  67.0,
+  21.0
+ ],
+ "Qidi Plus4": [
+  72.0,
+  32.0
+ ],
+ "Qidi Q1 Pro": [
+  70.0,
+  40.0
+ ],
+ "Qidi X-Max 3": [
+  70.0,
+  30.0
+ ],
+ "Qidi X-Plus 3": [
+  65.0,
+  36.0
+ ],
+ "Qidi X-Smart 3": [
+  65.0,
+  36.0
+ ],
+ "RatRig V-Core 4 300": [
+  45.0,
+  25.0
+ ],
+ "RatRig V-Core 4 400": [
+  45.0,
+  25.0
+ ],
+ "RatRig V-Core 4 500": [
+  45.0,
+  25.0
+ ],
+ "Snapmaker 2.0 A250": [
+  75.0,
+  35.0
+ ],
+ "Snapmaker 2.0 A350": [
+  75.0,
+  35.0
+ ],
+ "Snapmaker Artisan": [
+  75.0,
+  32.0
+ ],
+ "Sovol SV01 Pro": [
+  65.0,
+  36.0
+ ],
+ "Sovol SV06": [
+  65.0,
+  36.0
+ ],
+ "Sovol SV06 Plus": [
+  65.0,
+  36.0
+ ],
+ "Sovol SV07": [
+  65.0,
+  36.0
+ ],
+ "Sovol SV07 Plus": [
+  65.0,
+  36.0
+ ],
+ "Sovol SV08": [
+  65.0,
+  36.0
+ ],
+ "Tronxy X5SA": [
+  65.0,
+  36.0
+ ],
+ "Two Trees SK1": [
+  50.0,
+  60.0
+ ],
+ "Voron 0.2": [
+  65.0,
+  36.0
+ ],
+ "Voron 2.4 250": [
+  65.0,
+  36.0
+ ],
+ "Voron 2.4 300": [
+  65.0,
+  36.0
+ ],
+ "Voron 2.4 350": [
+  65.0,
+  36.0
+ ],
+ "Voron Switchwire": [
+  65.0,
+  36.0
+ ],
+ "Voron Trident 250": [
+  65.0,
+  36.0
+ ],
+ "Voron Trident 300": [
+  65.0,
+  36.0
+ ],
+ "Voron Trident 350": [
+  65.0,
+  36.0
+ ]
+}

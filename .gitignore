@@ -1,0 +1,32 @@
+# build output (the installer goes on the GitHub Releases page instead)
+build/
+dist/
+
+# files the app writes while running
+output/
+workspace/
+profiles/
+instance.json
+recent.json
+app_settings.json
+ui_state.json
+live_print.json
+*.log
+
+# generated test results
+models/*.gcode
+models/*_preview.html
+
+# Python / editor
+__pycache__/
+*.pyc
+.venv/
+venv/
+.claude/
+.vscode/
+.idea/
+printer_images/
+
+# private: supporter code keys (bundled into the app by build_installer.py)
+app/supporter_key.txt
+update_check.json
