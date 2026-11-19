@@ -34,7 +34,7 @@ body:
     id: version
     attributes:
       label: ArcLayer version
-      description: File → About, or the installer name
+      description: The number in the installer name (ArcLayer-Setup-0.8.4.exe), or in report.txt inside the report zip
       placeholder: "0.8.4"
   - type: textarea
     id: files
