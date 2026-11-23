@@ -47,7 +47,7 @@ The first start shows a short **intro** (File → Show the intro brings it back)
 - **Auto arrange** (⊞ Arrange above the plate, or A): spreads the parts over the plate, biggest first, compact and centred (`nonplanar/arrange.py`). The gap is 6 mm plus the brim when printing by layer, and the toolhead clearance radius when printing by object. Parts that touch stay together, and each group is set down on the plate.
 - **Supports** are made in the bent space, so they print on the same curved layers as the model. Their XY gap applies to walls only; under a curved underside the Z gap sets the distance.
 - **Remembered choices** (last presets, filament slots, tabs, cameras) are kept in `ui_state.json` in the data folder.
-- **Supporter codes**: the keys are in `app/supporter_key.txt`, which is not in git (the build refuses to run without it). Keep a copy of it somewhere safe: without it, no new codes can be made and the installed app can't check codes.
+- **Supporter codes**: the app holds only slow hashes of the valid codes (`app/supporter_hashes.py`), so no code can be made from it. `make_supporter_code.py` makes new ones; the codes themselves are in `supporter_codes.txt`, which is neither in git nor in the installer.
 
 Double-click **`ArcLayer.bat`**. The first start installs the Python libraries it needs.
 

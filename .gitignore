@@ -27,9 +27,12 @@ venv/
 .idea/
 printer_images/
 
-# private: supporter code keys (bundled into the app by build_installer.py)
+# private: old supporter code key (0.8.5 and older)
 app/supporter_key.txt
 update_check.json
 
 # launch drafts (not part of the app)
 launch/
+
+# private: the supporter codes themselves
+supporter_codes.txt

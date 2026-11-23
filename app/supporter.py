@@ -1,74 +1,39 @@
 """Supporter codes: hide the "support the project" reminder.
 
-A code is NPS-XXXX-XXXX-XXXX-XXXX: 4 random bytes plus a 6-byte HMAC of them, in base32.
-The app checks the HMAC offline, so no server is needed. Anyone who has a code can share it,
-but a made-up code doesn't work. Make new codes with:  python make_supporter_code.py [count]
+A code is NPS-XXXX-XXXX-XXXX-XXXX (80 bits in base32). The app holds only a slow hash of each valid code
+(app/supporter_hashes.py), so nothing in the app or the installer can be used to make a code. Codes are checked
+offline, no server is needed. Anyone who has a code can share it, but a made-up code doesn't work.
 
-The keys live in app/supporter_key.txt, which is not in git. Removing a key there makes the codes
-made with it stop working (do that if a code gets posted publicly).
+New codes: python make_supporter_code.py [count]. A code works from the next release on; a release without
+its hash stops accepting it (do that if a code gets posted publicly).
 """
-import base64
+import functools
 import hashlib
 import hmac
-import os
-import secrets
 
-from . import paths
+from .supporter_hashes import HASHES
 
-def _keys():
-    """The keys, from app/supporter_key.txt (not in git; the installer bundles it) or $ARCLAYER_SUPPORTER_KEYS."""
-    lines = os.environ.get("ARCLAYER_SUPPORTER_KEYS", "").split(",")
-    for p in (os.path.join(paths.RESOURCES, "app", KEY_FILE), os.path.join(os.path.dirname(os.path.abspath(__file__)), KEY_FILE)):
-        try:
-            with open(p, encoding="utf-8") as f:
-                lines += f.read().splitlines()
-            break
-        except OSError:
-            continue
-    out = []
-    for ln in lines:
-        ln = ln.strip()
-        if ln and not ln.startswith("#"):
-            try:
-                out.append(bytes.fromhex(ln))
-            except ValueError:
-                pass
-    return out
-
-
-KEY_FILE = "supporter_key.txt"
-KEYS = _keys()
 PREFIX = "NPS"
-
-
-def _mac(body, key=None):
-    if key is None:
-        if not KEYS:
-            raise RuntimeError("No supporter key: app/supporter_key.txt is missing")
-        key = KEYS[0]
-    return hmac.new(key, b"nonplanar-supporter|" + body, hashlib.sha256).digest()[:6]
-
-
-def make_code():
-    body = secrets.token_bytes(4)
-    s = base64.b32encode(body + _mac(body)).decode()          # 10 bytes -> 16 characters
-    return PREFIX + "-" + "-".join(s[i:i + 4] for i in range(0, 16, 4))
+ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"
 
 
 def normalize(code):
     s = "".join(ch for ch in str(code).upper() if ch.isalnum())
-    if s.startswith(PREFIX):
+    if s.startswith(PREFIX) and len(s) > 16:
         s = s[len(PREFIX):]
     # characters base32 doesn't use, typed by mistake
     return s.translate(str.maketrans({"0": "O", "1": "I", "8": "B", "9": "G"}))
 
 
+@functools.lru_cache(maxsize=32)
+def digest(s):
+    """The hash of a normalized code. Slow on purpose (about 0.1 s, 32 MB), so guessing codes isn't worth it."""
+    return hashlib.scrypt(s.encode(), salt=b"arclayer-supporter", n=2 ** 15, r=8, p=1, maxmem=2 ** 26, dklen=16).hex()
+
+
 def check(code):
     s = normalize(code)
-    if len(s) != 16:
+    if len(s) != 16 or any(c not in ALPHABET for c in s):
         return False
-    try:
-        raw = base64.b32decode(s)
-    except (ValueError, base64.binascii.Error):
-        return False
-    return any(hmac.compare_digest(raw[4:], _mac(raw[:4], k)) for k in KEYS)
+    d = digest(s)
+    return any(hmac.compare_digest(d, h) for h in HASHES)

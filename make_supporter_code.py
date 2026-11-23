@@ -1,24 +1,39 @@
-"""Prints new supporter codes for ArcLayer (put one in your Ko-fi thank-you message,
-or send one to a supporter yourself).   python make_supporter_code.py [how many]
-python make_supporter_code.py --new-key   puts a fresh key at the top of app/supporter_key.txt (new codes use it;
-codes made with the keys below it keep working until you delete those lines)."""
+"""Makes new supporter codes for ArcLayer:   python make_supporter_code.py [how many]
+
+The codes go into supporter_codes.txt (private, not in git, not in the installer: keep a backup) and their
+hashes into app/supporter_hashes.py (public). A code works in releases built after this, so some spare codes
+are made ahead: to change the code in the Ko-fi thank-you message, take the next spare one."""
 import os
 import secrets
 import sys
 
 from app import supporter
 
-if "--new-key" in sys.argv:
-    p = os.path.join(os.path.dirname(os.path.abspath(supporter.__file__)), supporter.KEY_FILE)
-    old = open(p, encoding="utf-8").read().splitlines() if os.path.exists(p) else []
-    head = [ln for ln in old if ln.startswith("#")]
-    keys = [ln for ln in old if ln.strip() and not ln.startswith("#")]
-    with open(p, "w", encoding="utf-8") as f:
-        f.write("\n".join(head + [secrets.token_hex(32)] + keys) + "\n")
-    print("new key written to", p)
-    sys.exit(0)
+ROOT = os.path.dirname(os.path.abspath(__file__))
+CODES = os.path.join(ROOT, "supporter_codes.txt")
+HASHES = os.path.join(ROOT, "app", "supporter_hashes.py")
 
-for _ in range(int(sys.argv[1]) if len(sys.argv) > 1 else 1):
-    code = supporter.make_code()
-    assert supporter.check(code)
-    print(code)
+
+def new_code():
+    s = "".join(secrets.choice(supporter.ALPHABET) for _ in range(16))
+    return supporter.PREFIX + "-" + "-".join(s[i:i + 4] for i in range(0, 16, 4))
+
+
+def add(codes):
+    hashes = list(supporter.HASHES)
+    with open(CODES, "a", encoding="utf-8") as f:
+        for c in codes:
+            h = supporter.digest(supporter.normalize(c))
+            if h not in hashes:
+                hashes.append(h)
+                f.write(c + "\n")
+    with open(HASHES, "w", encoding="utf-8", newline="\n") as f:
+        f.write('"""Hashes of the valid supporter codes, written by make_supporter_code.py. They can\'t be turned back into codes."""\n'
+                "HASHES = (\n" + "".join(f'    "{h}",\n' for h in hashes) + ")\n")
+
+
+if __name__ == "__main__":
+    new = [new_code() for _ in range(int(sys.argv[1]) if len(sys.argv) > 1 else 1)]
+    add(new)
+    print(*new, sep="\n")
+    print("Saved in", CODES)

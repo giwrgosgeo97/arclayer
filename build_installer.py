@@ -14,7 +14,7 @@ import subprocess
 import sys
 import zipfile
 
-VERSION = "0.8.5"
+VERSION = "0.8.6"
 ROOT = os.path.dirname(os.path.abspath(__file__))
 INST = os.path.join(ROOT, "installer")
 BUILD = os.path.join(ROOT, "build")
@@ -65,10 +65,6 @@ def main():
         f.write(VERSION)
     shutil.rmtree(DIST, ignore_errors=True)
 
-    KEYS = os.path.join(ROOT, "app", "supporter_key.txt")
-    if not os.path.exists(KEYS):
-        raise SystemExit("app/supporter_key.txt is missing: supporter codes would not work. "
-                         "Copy it from your backup, or make one: python make_supporter_code.py --new-key")
     print("\n[1/4] App")
     excl = [x for m in EXCLUDE for x in ("--exclude-module", m)]
     pyinstaller("--windowed", "--name", "ArcLayer", "--icon", ICON,
@@ -77,7 +73,6 @@ def main():
                 "--add-data", f"{os.path.join(ROOT, 'nonplanar', 'bambu_gcode')}{SEP}nonplanar/bambu_gcode",
                 "--add-data", f"{os.path.join(ROOT, 'nonplanar', 'printer_gcode.json')}{SEP}nonplanar",
                 "--add-data", f"{os.path.join(ROOT, 'nonplanar', 'clearance.json')}{SEP}nonplanar",
-                "--add-data", f"{KEYS}{SEP}app",                      # supporter code keys (private, not in git)
                 "--add-data", f"{os.path.join(INST, 'version.txt')}{SEP}.",   # the app knows its version (updates, reports)
                 "--collect-data", "trimesh", "--hidden-import", "app.server",
                 # PyAV (FFmpeg) for your own camera (RTSP / HTTP)
