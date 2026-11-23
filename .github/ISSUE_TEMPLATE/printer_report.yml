@@ -21,7 +21,7 @@ body:
     attributes:
       label: Curved-layer mode
       multiple: true
-      options: [Follow the top surface, Conical, Flat]
+      options: [Follow the top surface, Conical]
   - type: dropdown
     id: send
     attributes:

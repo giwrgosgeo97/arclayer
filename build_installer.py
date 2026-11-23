@@ -14,7 +14,7 @@ import subprocess
 import sys
 import zipfile
 
-VERSION = "0.8.4"
+VERSION = "0.8.5"
 ROOT = os.path.dirname(os.path.abspath(__file__))
 INST = os.path.join(ROOT, "installer")
 BUILD = os.path.join(ROOT, "build")

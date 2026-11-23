@@ -9,6 +9,8 @@ import numpy as np
 from shapely.geometry import MultiLineString, LineString, Polygon
 from shapely import affinity
 
+from .geo import inter
+
 
 class P:
     """Light toolpath record; slicer.Path is built from it."""
@@ -50,7 +52,7 @@ def _clip(area, lines):
     """Lines inside an area. An area left slightly invalid by earlier boolean operations (it happens
     with support on curved layers) is repaired first instead of stopping the slice."""
     try:
-        return area.intersection(lines)
+        return inter(area, lines)
     except Exception:
         import shapely
         fixed = shapely.make_valid(shapely.set_precision(area, 1e-4))

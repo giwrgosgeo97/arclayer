@@ -4,6 +4,8 @@ Output is a list of Layer objects. Each holds 2D paths (X/Y) plus the flat layer
 height z' they belong to. gcode.py later bends them back to curved 3D paths.
 """
 import math
+import os
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from functools import reduce
 
@@ -15,10 +17,22 @@ from shapely.geometry import MultiLineString, LineString, Polygon, MultiPolygon
 from shapely.ops import polygonize, unary_union
 
 from .transforms import make_transform
+from .geo import inter, diff, symdiff, simplify
 from . import support as support_mod
 from . import patterns
 
 EMPTY = MultiPolygon()
+
+# Shapely lets other threads run while it works on a shape, so layers can be prepared on several cores.
+THREADS = max(1, min(8, (os.cpu_count() or 2)))
+_POOL = None
+
+
+def _pool():
+    global _POOL
+    if _POOL is None:
+        _POOL = ThreadPoolExecutor(THREADS, thread_name_prefix="slice")
+    return _POOL
 
 # feature kinds, in the order the preview legend shows them
 KINDS = ["outer_wall", "inner_wall", "overhang_wall", "top_surface", "bottom_surface", "solid", "bridge",
@@ -238,8 +252,8 @@ def _loops_to_polygons(segs, resolution):
     if not rings:
         return EMPTY
     rings.sort(key=lambda p: -p.area)
-    result = reduce(lambda a, b: a.symmetric_difference(b), rings)   # even-odd: nested loops become holes
-    return result.buffer(0).simplify(max(resolution, 0.001), preserve_topology=True)
+    result = reduce(symdiff, rings)   # even-odd: nested loops become holes
+    return simplify(result.buffer(0), max(resolution, 0.001))
 
 
 def _to_polygons(segments, resolution):
@@ -260,8 +274,8 @@ def _to_polygons(segments, resolution):
     # even-odd rule on the outer boundary of every face: nested loops become holes
     faces = [Polygon(f.exterior) for f in faces]
     faces.sort(key=lambda p: -p.area)
-    result = reduce(lambda a, b: a.symmetric_difference(b), faces)
-    return result.buffer(0).simplify(max(resolution, 0.001), preserve_topology=True)
+    result = reduce(symdiff, faces)
+    return simplify(result.buffer(0), max(resolution, 0.001))
 
 
 def plane_sections(mesh, heights):
@@ -319,10 +333,10 @@ def plane_sections(mesh, heights):
     return out
 
 
-def slice_regions(bent, zs, resolution=0.012):
-    """Cut the bent mesh at every layer height into filled outlines."""
+def slice_regions(bent, zs, resolution=0.012, then=lambda r: r):
+    """Cut the bent mesh at every layer height into filled outlines (then: applied to each one)."""
     heights = np.asarray(zs, float)
-    return [_to_polygons(sg, resolution) for sg in plane_sections(bent, heights)]
+    return list(_pool().map(lambda sg: then(_to_polygons(sg, resolution)), plane_sections(bent, heights)))
 
 
 def compensate(region, s):
@@ -484,14 +498,14 @@ def island_walls(island, s, n_walls, widths, h, top_exposed):
         return [], EMPTY
     fill = island.buffer(-depth[-1], join_style=2, mitre_limit=2.0)
     if s.only_one_wall_top and len(loops) > 1 and not top_exposed.is_empty:
-        top = top_exposed.intersection(island)
+        top = inter(top_exposed, island)
         if not top.is_empty:
             cut = top.buffer(spacing(w_in, h) / 2)
             for k in range(1, len(loops)):
                 pieces = []
                 for p in loops[k]:
                     full = LineString(p.pts)
-                    rest = full.difference(cut)
+                    rest = diff(full, cut)
                     if rest.is_empty:
                         continue
                     if rest.geom_type == "LineString" and abs(rest.length - full.length) < 1e-6:
@@ -500,7 +514,7 @@ def island_walls(island, s, n_walls, widths, h, top_exposed):
                     for g in patterns._lines(rest, 0.5):
                         pieces.append(Path("inner_wall", np.asarray(g.coords), False, p.width))
                 loops[k] = pieces
-            fill = unary_union([fill, island.buffer(-depth[0], join_style=2, mitre_limit=2.0).intersection(top)])
+            fill = unary_union([fill, inter(island.buffer(-depth[0], join_style=2, mitre_limit=2.0), top)])
     return loops, fill
 
 
@@ -524,19 +538,46 @@ def wall_sequence(loops, s, pos, seamer):
     return out
 
 
-def overhang_split(p, prev, s, speeds):
+class Below:
+    """The layer below, ready for many "how far does this wall hang over it?" questions."""
+
+    def __init__(self, region):
+        self.region = region
+        self.empty = region is None or region.is_empty
+        self._inset = {}
+        self._tree = None
+
+    def inset(self, d):
+        if d not in self._inset:
+            g = self.region.buffer(-d)
+            shapely.prepare(g)
+            self._inset[d] = g
+        return self._inset[d]
+
+    def signed(self, pts):
+        """Distance from the region's edge: > 0 outside it, < 0 inside."""
+        if self._tree is None:
+            co, ring = shapely.get_coordinates(shapely.get_parts(shapely.boundary(self.region)), return_index=True)
+            ok = ring[1:] == ring[:-1]
+            self._tree = shapely.STRtree(shapely.linestrings(np.stack([co[:-1][ok], co[1:][ok]], axis=1)))
+            shapely.prepare(self.region)
+        geoms = shapely.points(pts)
+        (k, _), dist = self._tree.query_nearest(geoms, return_distance=True, all_matches=False)
+        d = np.empty(len(pts))
+        d[k] = dist
+        return np.where(shapely.covers(self.region, geoms), -d, d)
+
+
+def overhang_split(p, below, s, speeds):
     """Split a wall into runs by how far it hangs over the layer below (Orca's 4 overhang tiers)."""
     w = p.width
-    if prev is None or prev.is_empty:
+    if below is None or below.empty:
         return [p]
     line = LineString(p.pts)
-    if line.within(prev.buffer(-0.45 * w)):
+    if below.inset(0.45 * w).covers(line):
         return [p]
     pts = _densify(p.pts, 0.5)
-    pts_geom = shapely.points(pts)
-    outside = shapely.distance(prev, pts_geom)
-    inside = shapely.distance(prev.boundary, pts_geom)
-    signed = np.where(outside > 0, outside, -inside)
+    signed = below.signed(pts)
     frac = np.clip((signed + w / 2) / w, 0, 1)
     tier = np.where(frac < 0.05, 0, np.ceil(frac * 4)).astype(int)
     if not tier.any():
@@ -565,11 +606,13 @@ def frac_threshold_tier(s):
 
 
 def _densify(pts, max_seg):
-    out = [pts[:1]]
-    for a, b in zip(pts[:-1], pts[1:]):
-        n = max(1, int(np.ceil(np.linalg.norm(b - a) / max_seg)))
-        out.append(a + (b - a) * (np.arange(1, n + 1)[:, None] / n))
-    return np.vstack(out)
+    pts = np.asarray(pts, float)
+    a, b = pts[:-1], pts[1:]
+    d = b - a
+    n = np.maximum(1, np.ceil(np.sqrt((d * d).sum(1)) / max_seg)).astype(int)
+    seg = np.repeat(np.arange(len(a)), n)
+    k = np.arange(len(seg)) - np.repeat(np.cumsum(n) - n, n) + 1
+    return np.vstack([pts[:1], a[seg] + d[seg] * (k / n[seg])[:, None]])
 
 
 # ---------------------------------------------------------------- main entry
@@ -644,7 +687,7 @@ def slice_model(source, settings, log=print, progress=_noop, placement=None,
             pm = pm.copy()
             pm.apply_transform(M)
             pb = bend_mesh(pm, tf, max_edge=max(0.5, s.line_width * 2))
-            part_regions.append([prep(r) for r in slice_regions(pb, mids, s.resolution)])
+            part_regions.append(slice_regions(pb, mids, s.resolution, prep))
             progress(0.12 + 0.06 * (k + 1) / len(parts), f"Slicing part {k + 1}/{len(parts)}")
         order = np.argsort([abs(p.volume) for p in parts])
         tools = sorted(set(part_tools[:len(parts)]))
@@ -667,7 +710,7 @@ def slice_model(source, settings, log=print, progress=_noop, placement=None,
             regions.append(shapely.set_precision(claimed, 1e-4))
         log(f"{len(parts)} parts in {len(tools)} filaments: " + ", ".join(f"filament {t + 1}" for t in tools))
     else:
-        regions = [prep(r) for r in slice_regions(bent, mids, s.resolution)]
+        regions = slice_regions(bent, mids, s.resolution, prep)
         groups = {(part_tools[0] if part_tools else 0): regions}
     n = len(regions)
 
@@ -708,14 +751,32 @@ def slice_model(source, settings, log=print, progress=_noop, placement=None,
     pos = (s.bed_x / 2, s.bed_y / 2)
     current = None            # filament loaded at the end of the previous layer
     printed_n = 0             # printed layers so far (what the preview slider counts)
+    fw = s.first_layer_line_width
+    W1 = dict(outer=fw, inner=fw, top=fw, solid=fw, sparse=fw)
+    Wn = dict(outer=s.outer_wall_line_width, inner=s.inner_wall_line_width, top=s.top_surface_line_width,
+              solid=s.solid_infill_line_width, sparse=s.sparse_infill_line_width)
+
+    def geometry(i):
+        return {t: _region_geometry(i, g[i], regions, Wn if i else W1, float(thick[i]), s, ctx, float(tops[i]))
+                for t, g in groups.items() if not g[i].is_empty}
+
+    # the shapes of every layer on all cores, a little ahead of the ordering below (which goes layer by layer:
+    # each layer starts where the last one ended, and seams line up with the layer underneath)
+    ahead = 4 * THREADS
+    pending = {i: _pool().submit(geometry, i) for i in range(min(ahead, n))}
     for i, region in enumerate(regions):
         hi_ = float(thick[i])
         layer = Layer(i, float(tops[i]), thickness=hi_)
         first = i == 0
-        fw = s.first_layer_line_width
-        W = dict(outer=fw if first else s.outer_wall_line_width, inner=fw if first else s.inner_wall_line_width,
-                 top=fw if first else s.top_surface_line_width, solid=fw if first else s.solid_infill_line_width,
-                 sparse=fw if first else s.sparse_infill_line_width)
+        try:
+            geo = pending.pop(i).result()
+        except BaseException:
+            for f in pending.values():
+                f.cancel()
+            raise
+        if i + ahead < n:
+            pending[i + ahead] = _pool().submit(geometry, i + ahead)
+        below = Below(regions[i - 1]) if i > 0 else None
 
         sup_paths = _support_paths(sup[i], i, s, pos) if sup else []
         if sup_paths:
@@ -728,7 +789,7 @@ def slice_model(source, settings, log=print, progress=_noop, placement=None,
             g = g_regions[i]
             if g.is_empty:
                 continue
-            ps, sp, pos = _region_paths(i, g, regions, W, hi_, s, ctx, seamer, pos, layer.zp)
+            ps, sp, pos = _region_paths(i, geo[t], s, ctx, seamer, pos, below)
             tool = rule[-1] if rule else t
             for p in ps:
                 p.tool = tool
@@ -854,16 +915,15 @@ def fuzzy(pts, thickness, point_dist, rng):
     return np.vstack([q, q[:1]])
 
 
-def _region_paths(i, region, ref, W, hi_, s, ctx, seamer, pos, zp):
-    """Walls, surfaces, infill and ironing for one filament's area on layer i.
-    `ref` is the whole model's layers, so top/bottom surfaces appear only where the
-    model ends, not where one colour meets another."""
+def _region_geometry(i, region, ref, W, hi_, s, ctx, zp):
+    """Everything about one filament's area on layer i that doesn't depend on the order it prints in: wall
+    loops, the areas to fill and their raw fill lines, island by island. Runs on the thread pool."""
     n, n_top, n_bot = ctx["n"], ctx["n_top"], ctx["n_bot"]
     first = i == 0
     printed = region.buffer(-s.elefant_foot_compensation, join_style=2) if first and s.elefant_foot_compensation > 0 else region
     above = ref[i + 1] if i + 1 < n else EMPTY
     below = ref[i - 1] if i > 0 else EMPTY
-    top_exposed = _open(region.difference(above), 0.5 * W["top"]) if not above.is_empty else region
+    top_exposed = _open(diff(region, above), 0.5 * W["top"]) if not above.is_empty else region
     # areas that need solid fill: not covered by n_top layers above and n_bot below
     ups = [ref[j] for j in range(i + 1, min(n, i + 1 + n_top))]
     downs = [ref[j] for j in range(max(0, i - n_bot), i)]
@@ -872,19 +932,91 @@ def _region_paths(i, region, ref, W, hi_, s, ctx, seamer, pos, zp):
     elif not ups and not downs:
         covered = region.buffer(2 * W["solid"])     # no shells at all: nothing solid
     else:
-        covered = reduce(lambda a, b: a.intersection(b), ups + downs)
-    unsupported = _open(region.difference(below), 0.5 * W["solid"]) if i > 0 else EMPTY
+        covered = reduce(inter, ups + downs)
+    covered_in = covered.buffer(-W["solid"]) if not covered.is_empty else covered
+    unsupported = _open(diff(region, below), 0.5 * W["solid"]) if i > 0 else EMPTY
 
     n_walls = 1 if (first and s.only_one_wall_first_layer) else s.wall_count
     if s.alternate_extra_wall and not first and i % 2 == 1:
         n_walls += 1
-    rng = np.random.default_rng(1000 + i) if s.fuzzy_skin != "none" else None
     angle = s.infill_direction
-    islands = _polys(printed)
+    islands = []
+    for isl in _polys(printed):
+        g = {"island": isl, "sparse": EMPTY, "steps": [], "iron": None}
+        g["loops"], fill = island_walls(isl, s, n_walls, (W["outer"], W["inner"]), hi_, top_exposed)
+        if not fill.is_empty:
+            fill_area = fill.buffer(W["sparse"] * s.infill_overlap)
+            solid = diff(fill_area, covered_in) if not covered.is_empty else fill_area
+            solid = _open(solid, 0.01)
+            sparse = diff(fill_area, solid)
+            # small sparse pockets become solid
+            small = [p for p in _polys(sparse) if p.area < s.minimum_sparse_infill_area]
+            if small:
+                solid = unary_union([solid] + small)
+                sparse = diff(sparse, unary_union(small))
+            every = int(s.solid_infill_every_layers or 0)
+            if every > 0 and i > 0 and (i + 1) % every == 0 and not sparse.is_empty:
+                solid = unary_union([solid, sparse])
+                sparse = EMPTY
+            if "lightning" in ctx and not sparse.is_empty:
+                sparse = inter(sparse, ctx["lightning"][i]) if not ctx["lightning"][i].is_empty else EMPTY
+                sparse = _open(sparse, 0.01) if not sparse.is_empty else EMPTY
+            bridge = inter(solid, unsupported) if not unsupported.is_empty else EMPTY
+            bridge = _open(bridge, 0.5 * W["solid"])
+            rest = diff(solid, bridge) if not bridge.is_empty else solid
+            top = inter(rest, top_exposed) if not first else EMPTY
+            top = _open(top, 0.25 * W["top"])
+            internal = diff(rest, top) if not top.is_empty else rest
+
+            # raw fill lines in printing order: (paths, keep their order)
+            def add(area, pattern, w, kind, ang=s.solid_infill_direction, **kw):
+                if area.is_empty:
+                    return
+                sp = spacing(w, hi_)
+                if kind == "top_surface":
+                    sp /= max(0.1, s.top_surface_density)
+                elif kind == "bottom_surface":
+                    sp /= max(0.1, s.bottom_surface_density)
+                raw, keep = patterns.surface(area, pattern, sp, ang, i, kind)
+                g["steps"].append((_as_paths(raw, w, **kw), keep))
+
+            if first:
+                add(internal, s.bottom_surface_pattern, W["solid"], "bottom_surface")
+            else:
+                for b in _polys(bridge):
+                    raw = patterns.hatch(b, W["solid"], s.bridge_angle or _bridge_angle(b), "bridge")
+                    g["steps"].append((_as_paths(raw, W["solid"], flow=s.bridge_flow, fan=s.overhang_fan_speed), False))
+                add(internal, s.internal_solid_infill_pattern, W["solid"], "solid")
+                add(top, s.top_surface_pattern, W["top"], "top_surface")
+            if not sparse.is_empty and s.infill_density > 0:
+                raw = patterns.sparse(sparse, s.infill_pattern, W["sparse"], s.infill_density, angle, i, zp)
+                g["steps"].append((_as_paths(raw, W["sparse"]), False))
+                g["sparse"] = sparse
+            # ironing
+            iron_area = {"top": top, "topmost": top if i == ctx["last_layer"] else EMPTY,
+                         "solid": unary_union([top, internal, bridge]) if s.ironing_type == "solid" else EMPTY
+                         }.get(s.ironing_type, EMPTY)
+            if not iron_area.is_empty:
+                iron_area = iron_area.buffer(-s.ironing_inset) if s.ironing_inset > 0 else iron_area
+                if s.ironing_pattern == "concentric":
+                    raw = patterns.concentric(iron_area, s.ironing_spacing, "ironing")
+                else:
+                    ia = s.ironing_angle if s.ironing_angle >= 0 else s.solid_infill_direction + 90 + (90 if i % 2 else 0)
+                    raw = patterns.hatch(iron_area, s.ironing_spacing, ia, "ironing")
+                # Orca: each ironing line extrudes ironing_flow x a normal top-surface line
+                g["iron"] = _as_paths(raw, W["top"], flow=s.ironing_flow, speed=s.ironing_speed)
+        islands.append(g)
+    return islands
+
+
+def _region_paths(i, geometry, s, ctx, seamer, pos, below):
+    """Walls, surfaces, infill and ironing for one filament's area on layer i, in printing order.
+    geometry: from _region_geometry."""
+    first = i == 0
+    rng = np.random.default_rng(1000 + i) if s.fuzzy_skin != "none" else None
     layer_paths, ironing, sparse_areas = [], [], []
-    for isl in _island_order(islands, pos):
-        loops, fill = island_walls(isl, s, n_walls, (W["outer"], W["inner"]), hi_, top_exposed)
-        walls = wall_sequence(loops, s, pos, seamer)
+    for g in _island_order(geometry, pos):
+        walls = wall_sequence(g["loops"], s, pos, seamer)
         if rng is not None and not first:
             fz = ("outer_wall",) if s.fuzzy_skin == "external" else ("outer_wall", "inner_wall")
             walls = [_with(p, fuzzy(p.pts, s.fuzzy_skin_thickness, s.fuzzy_skin_point_distance, rng))
@@ -894,76 +1026,18 @@ def _region_paths(i, region, ref, W, hi_, s, ctx, seamer, pos, zp):
         for p in walls:
             if p.closed and s.small_perimeter_threshold > 0 and _length(p.pts) < 2 * math.pi * s.small_perimeter_threshold:
                 p = _with(p, p.pts, speed=s.small_perimeter_speed * s.outer_wall_speed)
-            wall_paths += overhang_split(p, below if i > 0 else None, s, ctx["ov_speeds"])
-
+            wall_paths += overhang_split(p, below, s, ctx["ov_speeds"])
         fills = []
-        if not fill.is_empty:
-            fill_area = fill.buffer(W["sparse"] * s.infill_overlap)
-            solid = fill_area.difference(covered.buffer(-W["solid"])) if not covered.is_empty else fill_area
-            solid = _open(solid, 0.01)
-            sparse = fill_area.difference(solid)
-            # small sparse pockets become solid
-            small = [p for p in _polys(sparse) if p.area < s.minimum_sparse_infill_area]
-            if small:
-                solid = unary_union([solid] + small)
-                sparse = sparse.difference(unary_union(small))
-            every = int(s.solid_infill_every_layers or 0)
-            if every > 0 and i > 0 and (i + 1) % every == 0 and not sparse.is_empty:
-                solid = unary_union([solid, sparse])
-                sparse = EMPTY
-            if "lightning" in ctx and not sparse.is_empty:
-                sparse = sparse.intersection(ctx["lightning"][i]) if not ctx["lightning"][i].is_empty else EMPTY
-                sparse = _open(sparse, 0.01) if not sparse.is_empty else EMPTY
-            bridge = solid.intersection(unsupported) if not unsupported.is_empty else EMPTY
-            bridge = _open(bridge, 0.5 * W["solid"])
-            rest = solid.difference(bridge) if not bridge.is_empty else solid
-            top = rest.intersection(top_exposed) if not first else EMPTY
-            top = _open(top, 0.25 * W["top"])
-            internal = rest.difference(top) if not top.is_empty else rest
-            cur = walls[-1].pts[-1] if walls else pos
-
-            def add(area, pattern, w, kind, ang=s.solid_infill_direction, **kw):
-                nonlocal cur
-                if area.is_empty:
-                    return
-                sp = spacing(w, hi_)
-                if kind == "top_surface":
-                    sp /= max(0.1, s.top_surface_density)
-                elif kind == "bottom_surface":
-                    sp /= max(0.1, s.bottom_surface_density)
-                raw, keep = patterns.surface(area, pattern, sp, ang, i, kind)
-                ps = order_paths(_as_paths(raw, w, **kw), cur, keep_order=keep)
-                fills.extend(ps)
-                if ps:
-                    cur = ps[-1].pts[-1]
-
-            if first:
-                add(internal, s.bottom_surface_pattern, W["solid"], "bottom_surface")
-            else:
-                for b in _polys(bridge):
-                    raw = patterns.hatch(b, W["solid"], s.bridge_angle or _bridge_angle(b), "bridge")
-                    ps = order_paths(_as_paths(raw, W["solid"], flow=s.bridge_flow, fan=s.overhang_fan_speed), cur)
-                    fills.extend(ps)
-                    if ps:
-                        cur = ps[-1].pts[-1]
-                add(internal, s.internal_solid_infill_pattern, W["solid"], "solid")
-                add(top, s.top_surface_pattern, W["top"], "top_surface")
-            if not sparse.is_empty and s.infill_density > 0:
-                raw = patterns.sparse(sparse, s.infill_pattern, W["sparse"], s.infill_density, angle, i, zp)
-                fills += order_paths(_as_paths(raw, W["sparse"]), cur)
-                sparse_areas.append(sparse)
-            # ironing
-            iron_area = {"top": top, "topmost": top if i == ctx["last_layer"] else EMPTY,
-                         "solid": unary_union([top, internal, bridge])}.get(s.ironing_type, EMPTY)
-            if not iron_area.is_empty:
-                iron_area = iron_area.buffer(-s.ironing_inset) if s.ironing_inset > 0 else iron_area
-                if s.ironing_pattern == "concentric":
-                    raw = patterns.concentric(iron_area, s.ironing_spacing, "ironing")
-                else:
-                    ia = s.ironing_angle if s.ironing_angle >= 0 else s.solid_infill_direction + 90 + (90 if i % 2 else 0)
-                    raw = patterns.hatch(iron_area, s.ironing_spacing, ia, "ironing")
-                # Orca: each ironing line extrudes ironing_flow x a normal top-surface line
-                ironing += _as_paths(raw, W["top"], flow=s.ironing_flow, speed=s.ironing_speed)
+        cur = walls[-1].pts[-1] if walls else pos
+        for paths, keep in g["steps"]:
+            ps = order_paths(paths, cur, keep_order=keep)
+            fills.extend(ps)
+            if ps:
+                cur = ps[-1].pts[-1]
+        if not g["sparse"].is_empty:
+            sparse_areas.append(g["sparse"])
+        if g["iron"]:
+            ironing += g["iron"]
         layer_paths += (fills + wall_paths) if s.is_infill_first else (wall_paths + fills)
         if layer_paths:
             pos = layer_paths[-1].pts[-1]
@@ -975,14 +1049,16 @@ def _region_paths(i, region, ref, W, hi_, s, ctx, seamer, pos, zp):
 
 def _island_order(islands, pos):
     """Visit islands nearest-first."""
+    if len(islands) < 2:
+        return list(islands)
     out, p = [], np.asarray(pos, float)
     rest = list(islands)
+    edges = [np.asarray(g["island"].exterior.coords) for g in rest]
     while rest:
-        d = [np.min(np.sum((np.asarray(isl.exterior.coords) - p) ** 2, axis=1)) for isl in rest]
-        isl = rest.pop(int(np.argmin(d)))
-        out.append(isl)
-        c = isl.exterior.coords[0]
-        p = np.asarray(c)
+        d = [np.min(np.sum((e - p) ** 2, axis=1)) for e in edges]
+        k = int(np.argmin(d))
+        out.append(rest.pop(k))
+        p = edges.pop(k)[0]
     return out
 
 

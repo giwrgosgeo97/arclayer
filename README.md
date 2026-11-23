@@ -18,9 +18,9 @@ Normal slicers cut a model into flat layers. ArcLayer bends them:
 
 - **Follow the top surface**: the last layers follow the shape of the top, so domes, waves and slopes come out smooth instead of stair-stepped.
 - **Conical layers**: the layers are shallow cones, so steeper overhangs print **without support**.
-- **Safe for your printer**: every curved move is checked against the shape of your toolhead (nozzle cone, heater block, fan duct). If something could hit the print, ArcLayer lowers the curve and tells you.
+- **Collision check**: the printing moves are checked against a simple model of your toolhead (the nozzle cone and a disc for the heater block, with sizes you can set). If that could touch an earlier layer, ArcLayer lowers the curve and slices again, or warns you. It doesn't know your fan duct, cables or clips and doesn't check travel moves, so look at the preview and watch the print.
 
-The rest of a modern slicer is there too: an Orca-style interface, presets for **100+ printers** with their makers' own start G-code, multi-colour (AMS, CFS and M600 filament changes), tree and normal supports, 16 infill patterns, calibration prints, print by object with collision warnings, auto arrange, and sending straight to Bambu Lab, Prusa, Klipper/Moonraker and OctoPrint printers with a live camera view.
+The rest of a modern slicer is there too: an Orca-style interface, presets for **100+ printers** with their makers' own start G-code, multi-colour (AMS, CFS and M600 filament changes), tree and normal supports, 16 infill patterns, calibration prints, print by object with collision warnings, auto arrange, and sending straight to Bambu Lab, Prusa, Klipper/Moonraker and OctoPrint printers (tested on a Bambu Lab A1; the others so far only against test servers) with a live camera view.
 
 ![The layers building up: the last ones follow the curved top](docs/layers.gif)
 

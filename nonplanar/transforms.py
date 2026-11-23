@@ -197,9 +197,8 @@ class SurfaceTransform:
     @classmethod
     def from_mesh(cls, mesh, depth, max_angle, min_ratio, floor, cell=0.5, log=print):
         """Height map of the top surface, limited to `depth` mm and `max_angle` degrees of slope."""
-        import trimesh
         from scipy import ndimage
-        v, _f = trimesh.remesh.subdivide_to_size(mesh.vertices, mesh.faces, max_edge=0.9 * cell, max_iter=14)
+        v = _surface_points(mesh, 0.9 * cell)
         lo = mesh.bounds[0][:2] - 4 * cell
         hi = mesh.bounds[1][:2] + 4 * cell
         shape = np.ceil((hi - lo) / cell).astype(int) + 1
@@ -240,6 +239,44 @@ class SurfaceTransform:
             log(f"Top surface: follows up to {Dd:.1f} mm of height difference, slopes up to {np.degrees(np.arctan(t)):.0f}°; "
                 f"layers bend from {max(z0, 0):.1f} mm to {z0 + R:.1f} mm")
         return cls(lo[0], lo[1], cell, d, z0, R, c[0], c[1])
+
+
+def _surface_points(mesh, max_edge):
+    """Points all over the mesh, closer than max_edge: every edge longer than that is halved until none is left.
+    The same points trimesh's subdivide_to_size gives, without joining the triangles up again (its slow part)."""
+    tri = np.asarray(mesh.vertices, float)[np.asarray(mesh.faces)]
+    out = []
+    for _ in range(40):
+        d = tri[:, [1, 2, 0]] - tri                       # edges v0v1, v1v2, v2v0
+        split = (d * d).sum(2) ** 0.5 > max_edge
+        count = split.sum(1)
+        out.append(tri[count == 0].reshape(-1, 3))
+        if not count.any():
+            break
+        new = []
+        q, sp = tri[count == 1], split[count == 1]        # one long edge: turned to be (a, b)
+        if len(q):
+            j, r = np.argmax(sp, axis=1), np.arange(len(q))
+            a, b, c = q[r, j], q[r, (j + 1) % 3], q[r, (j + 2) % 3]
+            p = (a + b) / 2
+            new += [(a, p, c), (p, b, c)]
+        q, sp = tri[count == 2], split[count == 2]        # two: the short edge turned to be (c, a)
+        if len(q):
+            j, r = (np.argmin(sp, axis=1) + 1) % 3, np.arange(len(q))
+            a, b, c = q[r, j], q[r, (j + 1) % 3], q[r, (j + 2) % 3]
+            p, o = (a + b) / 2, (b + c) / 2
+            new.append((p, b, o))
+            aq = ((a - o) ** 2).sum(1) <= ((p - c) ** 2).sum(1)      # the quad, cut along its shorter diagonal
+            new += [(a[aq], p[aq], o[aq]), (a[aq], o[aq], c[aq]), (a[~aq], p[~aq], c[~aq]), (p[~aq], o[~aq], c[~aq])]
+        q = tri[count == 3]
+        if len(q):
+            a, b, c = q[:, 0], q[:, 1], q[:, 2]
+            ab, bc, ca = (a + b) / 2, (b + c) / 2, (c + a) / 2
+            new += [(a, ab, ca), (ab, b, bc), (ca, bc, c), (ab, bc, ca)]
+        tri = np.concatenate([np.stack(x, axis=1) for x in new])
+    else:
+        out.append(tri.reshape(-1, 3))
+    return np.vstack(out)
 
 
 def _disk(r):

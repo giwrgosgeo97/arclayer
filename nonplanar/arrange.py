@@ -12,7 +12,6 @@ arrangement smallest and squarest, near the middle of the plate.
 import numpy as np
 import shapely
 import shapely.affinity
-from scipy.signal import fftconvolve
 from shapely.geometry import MultiPoint, Polygon, box
 from shapely.ops import unary_union
 
@@ -66,6 +65,7 @@ def _raster(poly, x0, y0, w, h):
 
 def pack(outlines, bed_x, bed_y, gap):
     """outlines: shapely polygons (any position). Returns the (dx, dy) to move each one, or None if they don't fit."""
+    from scipy.signal import fftconvolve          # (slow to load, so only when it is needed)
     half = RES * 0.75                      # a cell's half diagonal: keeps the real gap at least `gap`
     W, H = int(np.floor((bed_x - 2 * EDGE) / RES)), int(np.floor((bed_y - 2 * EDGE) / RES))
     if W < 1 or H < 1:

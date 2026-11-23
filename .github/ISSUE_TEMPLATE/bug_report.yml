@@ -29,7 +29,7 @@ body:
     id: mode
     attributes:
       label: Curved-layer mode
-      options: [Follow the top surface, Conical, Flat, Not sure]
+      options: [Follow the top surface, Conical, Not sure]
   - type: input
     id: version
     attributes:

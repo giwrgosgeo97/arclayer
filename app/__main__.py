@@ -64,6 +64,34 @@ def _clear_instance():
         pass
 
 
+def _splash():
+    """What the window shows until the app is loaded."""
+    try:
+        with open(os.path.join(paths.RESOURCES, "app", "ui", "logo.svg"), encoding="utf-8") as f:
+            logo = f.read()
+    except OSError:
+        logo = ""
+    return f"""<!doctype html><meta charset="utf-8"><title>ArcLayer</title><style>
+html,body{{height:100%;margin:0;background:#1d1f24;color:#8f98a6;font:15px 'Segoe UI',sans-serif}}
+body{{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:22px}}
+svg{{width:104px;height:104px}}
+b{{font-size:34px;color:#f0f3f7}} b i{{font-style:normal;color:#00c2a4}}
+.bar{{width:220px;height:4px;border-radius:2px;background:#2c3038;overflow:hidden}}
+.bar i{{display:block;width:40%;height:100%;border-radius:2px;background:#00c2a4;animation:m 1.1s ease-in-out infinite alternate}}
+@keyframes m{{from{{transform:translateX(-60%)}}to{{transform:translateX(210%)}}}}
+</style><body>{logo}<b><i>Arc</i>Layer</b><div class="bar"><i></i></div><div>Starting…</div></body>"""
+
+
+def _start_error(e):
+    msg = f"{type(e).__name__}: {e}\n\nDetails are in {paths.LOG}"
+    try:
+        import ctypes
+        ctypes.windll.user32.MessageBoxW(None, msg, "ArcLayer could not start", 0x10)
+    except Exception:
+        print(msg)
+    return 1
+
+
 def main():
     moved = False
     try:
@@ -86,32 +114,54 @@ def main():
         if not a.new_window and _hand_to_running(a.file):
             return 0
 
-    from . import server
-    httpd, port = server.serve(a.port, open_file=a.file)
-    url = f"http://127.0.0.1:{port}/"
-    print(f"ArcLayer running at {url}")
-    _write_instance(port)
+    app = {}                                  # filled by start_server: "server" (the module), "url"
+
+    def start_server():                       # loads the slicing libraries: a second or two
+        if "url" not in app:
+            from . import server
+            _, port = server.serve(a.port, open_file=a.file)
+            app.update(server=server, url=f"http://127.0.0.1:{port}/")
+            print(f"ArcLayer running at {app['url']}")
+            _write_instance(port)
+        return app["url"]
+
     try:
         if a.serve_only:
             a.browser = True
         if not a.browser:
             try:
                 import webview
-                win = webview.create_window("ArcLayer", url, width=1560, height=960, min_size=(1100, 700),
+                # the window comes first, with a splash; the server starts behind it
+                win = webview.create_window("ArcLayer", html=_splash(), width=1560, height=960, min_size=(1100, 700),
                                             background_color="#1d1f24")
-                server.WINDOW = win
+
                 def closing():                # runs on the GUI thread; pywebview ends the process right after
-                    ok = server.on_closing()
+                    ok = app["server"].on_closing() if "server" in app else True
                     if ok:
                         _clear_instance()
                     return ok
                 win.events.closing += closing
-                webview.start()
+
+                def boot():
+                    try:
+                        url = start_server()
+                        app["server"].WINDOW = win
+                        win.load_url(url)
+                    except BaseException as e:
+                        import traceback
+                        traceback.print_exc()
+                        app["error"] = e
+                        win.destroy()
+                webview.start(boot)
+                if "error" in app:
+                    raise SystemExit(_start_error(app["error"]))
                 return 0
             except Exception as e:
-                server.WINDOW = None
+                if "server" in app:
+                    app["server"].WINDOW = None
                 print(f"App window unavailable ({e}); opening in the browser instead")
 
+        url = start_server()
         if not a.serve_only:
             webbrowser.open(url)
         try:

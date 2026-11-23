@@ -9,7 +9,6 @@ for every new layer, check that nothing rises higher than the head allows:
 The check is against previous layers (the dominant risk for curved layers).
 """
 import numpy as np
-from scipy.ndimage import grey_dilation
 
 CELL = 1.0  # mm
 MAX_MARKS = 5000  # collision points sent to the preview
@@ -28,11 +27,12 @@ def check(preview, s, log=print):
     d = np.hypot(gx, gy) + 0.7 * CELL
     allowed = np.minimum(d * s.nozzle_cone_slope, s.nozzle_free_height)
     # cells outside the head footprint can't collide
-    structure = np.where(d <= s.head_radius, -allowed, -1e6)
-    footprint = np.ones_like(structure, bool)
+    under = d <= s.head_radius
 
     padded = np.full((shape[0] + 2 * rad, shape[1] + 2 * rad), -1e3)   # hmap with a border of "nothing"
-    oi, oj = np.mgrid[0:2 * rad + 1, 0:2 * rad + 1]
+    oi, oj = np.nonzero(under)                                         # cells under the head, as flat offsets
+    offsets = oi * padded.shape[1] + oj
+    drop = allowed[under]
     worst, worst_layer, hits = 0.0, None, 0
     marks = []
     for n, lay in enumerate(preview):
@@ -43,13 +43,14 @@ def check(preview, s, log=print):
         if n > 0:
             # max over the head's neighbourhood of (printed height - allowed rise), evaluated only
             # at the cells this layer passes through (the whole-map dilation was the slow part)
-            cells, inv = np.unique(ij, axis=0, return_inverse=True)
+            cells, inv = np.unique(ij[:, 0] * padded.shape[1] + ij[:, 1], return_inverse=True)
             inv = inv.ravel()
+            flat = padded.ravel()                 # (a view)
             reach_c = np.full(len(cells), -1e3)
-            for c0 in range(0, len(cells), 4096):
-                cc = cells[c0:c0 + 4096]
-                win = padded[cc[:, 0][:, None, None] + oi, cc[:, 1][:, None, None] + oj]
-                reach_c[c0:c0 + 4096] = (win + structure).max(axis=(1, 2))
+            for c0 in range(0, len(cells), 1024):
+                win = flat.take(cells[c0:c0 + 1024, None] + offsets[None])
+                win -= drop
+                reach_c[c0:c0 + 1024] = win.max(axis=1)
             over = reach_c[inv] - pts[:, 2]
             bad = over > 0.05
             if bad.any():

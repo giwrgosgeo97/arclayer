@@ -42,13 +42,23 @@ window.addEventListener('pagehide', () => store.flush());
 async function api(path, body) {
   const opt = body === undefined ? {} : { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) };
   const r = await fetch('/api/' + path, opt);
-  const j = await r.json();
+  const j = await answer(r);
   if (!r.ok || j.error) throw new Error(j.error || r.statusText);
+  if (!QUIET.has(path)) wake();
   return j;
+}
+const QUIET = new Set(['pending', 'sync/status', 'job', 'device/status']);     // asked all the time: nothing to redraw
+// JSON, or JSON plus the raw bytes of its big arrays (server.py: _pack)
+async function answer(r) {
+  if (r.headers.get('Content-Type') !== 'application/x-arclayer') return r.json();
+  const buf = await r.arrayBuffer();
+  const n = new DataView(buf).getUint32(0, true), base = 4 + n;
+  return JSON.parse(new TextDecoder().decode(new Uint8Array(buf, 4, n)),
+    (k, v) => (v && v.$bin ? new Uint8Array(buf, base + v.$bin[0], v.$bin[1]) : v));
 }
 async function upload(path, file, headers = {}) {
   const r = await fetch('/api/' + path, { method: 'POST', headers: { 'X-Filename': encodeURIComponent(file.name), ...headers }, body: file });
-  const j = await r.json();
+  const j = await answer(r);
   if (!r.ok || j.error) throw new Error(j.error || r.statusText);
   return j;
 }
@@ -58,7 +68,17 @@ function toast(msg, err = false) {
   t.textContent = msg; t.className = 'show' + (err ? ' err' : '');
   clearTimeout(toastTimer); toastTimer = setTimeout(() => (t.className = ''), err ? Math.max(6000, msg.length * 70) : 3000);
 }
-const b64 = (s, T) => { const b = Uint8Array.from(atob(s), (c) => c.charCodeAt(0)); return new T(b.buffer); };
+const b64 = (s, T) => {                 // an array from the server: raw bytes, or base64 text (saved live view)
+  if (s instanceof Uint8Array) return new T(s.buffer, s.byteOffset, s.byteLength / T.BYTES_PER_ELEMENT);
+  const t = atob(s), b = new Uint8Array(t.length);
+  for (let k = 0; k < t.length; k++) b[k] = t.charCodeAt(k);
+  return new T(b.buffer);
+};
+// the 3D view redraws at full speed only while something is going on (see the loop in init)
+let awakeUntil = 0;
+function wake(ms = 1500) { awakeUntil = Math.max(awakeUntil, performance.now() + ms); }
+for (const e of ['pointerdown', 'pointermove', 'pointerup', 'wheel', 'keydown', 'keyup', 'input', 'change', 'click', 'dragover', 'drop', 'resize', 'focus'])
+  window.addEventListener(e, () => wake(), { capture: true, passive: true });
 const LIVE = { on: false, layer: 0, layerAt: 0, raf: 0, saved: null, name: '', layers: 0 };   // live view (see liveStart)
 const fmtTime = (s) => { s = Math.round(s); const h = Math.floor(s / 3600), m = Math.round((s % 3600) / 60); return h ? `${h}h ${m}m` : `${m}m`; };
 
@@ -553,6 +573,7 @@ function renderModal() {
 const wrap = $('#canvas-wrap');
 const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setPixelRatio(window.devicePixelRatio);
+renderer.debug.checkShaderErrors = false;       // waiting for the compiler's messages stops the whole window
 wrap.append(renderer.domElement);
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x1d1f24);
@@ -570,7 +591,16 @@ const previewGroup = new THREE.Group(); scene.add(previewGroup);
 let modelMesh = null, axisLine = null;
 let framed = false;
 
+// empty a group and free its graphics memory (three.js keeps it until told)
+function emptyGroup(g) {
+  g.traverse((o) => {
+    if (o.geometry) o.geometry.dispose();
+    for (const m of o.material ? [].concat(o.material) : []) { if (m.map) m.map.dispose(); m.dispose(); }
+  });
+  g.clear();
+}
 function resize() {
+  wake();
   const w = wrap.clientWidth, h = wrap.clientHeight;
   if (!w || !h) return;
   renderer.setSize(w, h);
@@ -613,7 +643,8 @@ function plateTexture(bx, by, m, look) {
   const k = Math.min(8, 4096 / Math.max(W, H));             // pixels per mm
   const c = document.createElement('canvas');
   c.width = Math.round(W * k); c.height = Math.round(H * k);
-  const g = c.getContext('2d');
+  // drawn by the processor: on the graphics card the speckles alone can hold up the whole window for seconds
+  const g = c.getContext('2d', { willReadFrequently: true });
   const X = (x) => (x + m) * k, Y = (y) => (H - (y + m)) * k;   // plate mm -> canvas px (y up)
   // plate surface with rounded corners and a soft sheen
   const r = 6 * k;
@@ -680,7 +711,7 @@ function shade(hex, d) {
 function buildBed() {
   const p = S.work.printer;
   const bx = +p.bed_x || 256, by = +p.bed_y || 256, m = 18;
-  bedGroup.clear();
+  emptyGroup(bedGroup);
   const look = PLATE_LOOK[S.plate] || PLATE_LOOK['Textured PEI Plate'];
   const plate = new THREE.Mesh(new THREE.PlaneGeometry(bx + 2 * m, by + 2 * m),
     new THREE.MeshBasicMaterial({ map: plateTexture(bx, by, m, look), transparent: true }));
@@ -698,7 +729,7 @@ function frameBed() {
 }
 
 function setModel(info) {
-  modelGroup.clear();
+  emptyGroup(modelGroup);
   modelMesh = null;
   S.model = info;
   S.parts = info ? info.parts.map((p) => ({ name: p.name, faces: p.faces })) : [];
@@ -1215,7 +1246,7 @@ const hiddenTools = new Set();
 let P = null; // preview buffers
 
 function buildPreview(data, stats, coll) {
-  previewGroup.clear();
+  emptyGroup(previewGroup);
   const pos = new THREE.BufferAttribute(b64(data.pos, Float32Array), 3);
   const kind = b64(data.kind, Uint8Array);
   const idx = b64(data.idx, Uint32Array);
@@ -1224,13 +1255,19 @@ function buildPreview(data, stats, coll) {
   let nt = 1;
   for (let v = 0; v < tool.length; v++) if (tool[v] + 1 > nt) nt = tool[v] + 1;
   // split segments per (feature type, filament), tracking where each layer ends in every list
-  const lists = Array.from({ length: nk * nt }, () => []);
-  const ends = Array.from({ length: nk * nt }, () => []);
-  const gsegs = Array.from({ length: nk * nt }, () => []);
+  const nc = nk * nt, counts = new Uint32Array(nc);
+  for (let j = 0; j < idx.length; j += 2) counts[kind[idx[j]] * nt + tool[idx[j]]]++;
+  const lists = Array.from(counts, (n) => new Uint32Array(2 * n));
+  const gsegs = Array.from(counts, (n) => new Uint32Array(n));
+  const ends = Array.from({ length: nc }, () => []);
+  const at = new Uint32Array(nc);
   let j = 0;
   for (const end of data.layers) {
-    for (; j < end; j += 2) { const v = idx[j], c = kind[v] * nt + tool[v]; lists[c].push(v, idx[j + 1]); gsegs[c].push(j >> 1); }
-    for (let k = 0; k < nk * nt; k++) ends[k].push(lists[k].length);
+    for (; j < end; j += 2) {
+      const v = idx[j], c = kind[v] * nt + tool[v], k = at[c]++;
+      lists[c][2 * k] = v; lists[c][2 * k + 1] = idx[j + 1]; gsegs[c][k] = j >> 1;
+    }
+    for (let k = 0; k < nc; k++) ends[k].push(2 * at[k]);
   }
   const objs = [];
   const colorAttr = new THREE.BufferAttribute(new Float32Array(pos.array.length), 3);
@@ -1239,12 +1276,12 @@ function buildPreview(data, stats, coll) {
     const g = new THREE.BufferGeometry();
     g.setAttribute('position', pos);
     g.setAttribute('color', colorAttr);
-    g.setIndex(new THREE.BufferAttribute(new Uint32Array(lists[c]), 1));
+    g.setIndex(new THREE.BufferAttribute(lists[c], 1));
     const line = new THREE.LineSegments(g, new THREE.LineBasicMaterial());
     line.frustumCulled = false;
     previewGroup.add(line);
     objs.push({ name: data.kinds[Math.floor(c / nt)], t: c % nt, line, ends: ends[c], count: lists[c].length,
-      gseg: Uint32Array.from(gsegs[c]) });
+      gseg: gsegs[c] });
   }
   P = { data, objs, stats, coll, posArr: pos.array, kind, idx, tool, speed: data.speed ? b64(data.speed, Uint16Array) : null,
     colorAttr, vals: {} };
@@ -1354,9 +1391,11 @@ function simTimes() {
     const a = idx[2 * g], b = idx[2 * g + 1];
     if (g > 0 && a !== idx[2 * g - 1]) {               // a new path: travel from the end of the last one
       const c = idx[2 * g - 1];
-      t += Math.hypot(pa[3 * a] - pa[3 * c], pa[3 * a + 1] - pa[3 * c + 1], pa[3 * a + 2] - pa[3 * c + 2]) / travel;
+      const x = pa[3 * a] - pa[3 * c], y = pa[3 * a + 1] - pa[3 * c + 1], z = pa[3 * a + 2] - pa[3 * c + 2];
+      t += Math.sqrt(x * x + y * y + z * z) / travel;
     }
-    const len = Math.hypot(pa[3 * b] - pa[3 * a], pa[3 * b + 1] - pa[3 * a + 1], pa[3 * b + 2] - pa[3 * a + 2]);
+    const dx = pa[3 * b] - pa[3 * a], dy = pa[3 * b + 1] - pa[3 * a + 1], dz = pa[3 * b + 2] - pa[3 * a + 2];
+    const len = Math.sqrt(dx * dx + dy * dy + dz * dz);
     t += len / Math.max(1, sp ? sp[b] : 50);
     cum[g + 1] = t;
   }
@@ -1589,7 +1628,7 @@ function markStale() {
   if (!S.sliced) return;
   S.sliced = false;
   $('#btn-print').disabled = true; $('#btn-export').disabled = true;
-  previewGroup.clear(); P = null; renderLegend();
+  emptyGroup(previewGroup); P = null; renderLegend();
   $('#preview-empty').classList.remove('hidden');
   $('#layer-slider').classList.add('hidden'); $('#move-slider').classList.add('hidden'); stopPlay(); simStop(); $('#sim-btn').classList.add('hidden');
 }
@@ -1612,9 +1651,12 @@ async function slice() {
     });
   } catch (e) { $('#btn-slice').disabled = false; return toast(e.message, true); }
   clearInterval(polling);
+  let asking = false;
   polling = setInterval(async () => {
+    if (asking) return;
+    asking = true;
     let j;
-    try { j = await api('job'); } catch { return; }
+    try { j = await api('job'); } catch { return; } finally { asking = false; }
     $('#progress-bar').style.width = (j.progress * 100).toFixed(1) + '%';
     $('#progress-text').textContent = j.text;
     $('#log').textContent = j.log.join('\n');
@@ -1636,7 +1678,7 @@ async function slice() {
       const low = c.angle_requested != null && Math.abs(c.angle_requested - c.angle_used) > 0.01;
       toast(`Sliced: ${fmtTime(j.stats.time_s)}, ${j.stats.filament_g.toFixed(1)} g` + (low ? ` · cone lowered to ${c.angle_used.toFixed(1)}° to avoid a collision` : ''));
     }
-  }, 350);
+  }, 200);
 }
 // Bambu printers print over the network (Device tab); others get a G-code file for USB / SD / web upload
 const isBambu = () => (S.presets.printer[S.sel.printer]?.vendor || 'Bambu Lab') === 'Bambu Lab';
@@ -1807,7 +1849,7 @@ function liveStop(restore = true) {
     buildPreview(...LIVE.saved);
     $('#sim-btn').classList.remove('hidden'); $('#move-slider').classList.remove('hidden');
   } else {
-    previewGroup.clear(); P = null;
+    emptyGroup(previewGroup); P = null;
     $('#legend').innerHTML = '';
     $('#preview-empty').classList.remove('hidden');
     $('#layer-slider').classList.add('hidden'); $('#move-slider').classList.add('hidden'); $('#sim-btn').classList.add('hidden');
@@ -2080,7 +2122,7 @@ function buildFaces() {
       const i = f * 9, g = p.off + f;
       a.fromArray(p.pos, i); b.fromArray(p.pos, i + 3); c.fromArray(p.pos, i + 6);
       cen[g * 3] = (a.x + b.x + c.x) / 3; cen[g * 3 + 1] = (a.y + b.y + c.y) / 3; cen[g * 3 + 2] = (a.z + b.z + c.z) / 3;
-      const nn = b.clone().sub(a).cross(c.clone().sub(a)).normalize();
+      const nn = b.sub(a).cross(c.sub(a)).normalize();
       nor[g * 3] = nn.x; nor[g * 3 + 1] = nn.y; nor[g * 3 + 2] = nn.z;
       dd[g] = nn.dot(a);
     }
@@ -2684,10 +2726,16 @@ async function init() {
   wire();
   setView('prepare');
   $('#layer-slider').classList.add('hidden'); $('#move-slider').classList.add('hidden'); stopPlay(); simStop(); $('#sim-btn').classList.add('hidden');
-  (function loop() {
+  let drawn = 0;
+  (function loop(now = performance.now()) {
     requestAnimationFrame(loop);
     if (S.view === 'device' || GL.lost) return;      // hidden: don't keep the graphics card busy for hours
-    controls.update(); renderer.render(scene, camera);
+    // nothing going on: four times a second is plenty (playback, simulation and the live view count as going on)
+    const busy = now < awakeUntil || playing || SIM.playing || LIVE.on;
+    if (!busy && now - drawn < 250) return;
+    drawn = now;
+    if (controls.update()) wake(500);                // still gliding
+    renderer.render(scene, camera);
   })();
   reportState();
   pollPending();

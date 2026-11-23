@@ -8,6 +8,8 @@ Presets are saved as JSON under profiles/<category>/<name>.json.
 import json
 import math
 import os
+import threading
+from concurrent.futures import ThreadPoolExecutor
 import re
 
 from nonplanar.config import Settings
@@ -975,7 +977,16 @@ def _speed_up_builtins():
                 json.dump(data, f, indent=2)
 
 
+_DEFAULTS_LOCK = threading.Lock()
+
+
 def ensure_defaults():
+    with _DEFAULTS_LOCK:
+        _ensure_defaults()
+
+
+def _ensure_defaults():
+    todo = []
     os.makedirs(os.path.join(ROOT, "process"), exist_ok=True)
     _retire_renamed()
     _speed_up_builtins()
@@ -999,8 +1010,19 @@ def ensure_defaults():
                     data = {**data, **{k: old[k] for k in ("ip", "serial", "access_code", "template_3mf") if old.get(k)}}
             elif cat == "printer":
                 data = {**data, **_sibling_connection(name, data)}
-            with open(p, "w", encoding="utf-8") as f:
-                json.dump({**data, "preset_version": PRESET_VERSION}, f, indent=2)
+            todo.append((p, {**data, "preset_version": PRESET_VERSION}))
+
+    def write(job):
+        p, data = job
+        text = json.dumps(data, indent=2)
+        with open(p, "w", encoding="utf-8") as f:
+            f.write(text)
+    if len(todo) > 20:        # the first start writes about a thousand files, each one scanned by the antivirus
+        with ThreadPoolExecutor(16) as ex:
+            list(ex.map(write, todo))
+    else:
+        for job in todo:
+            write(job)
 
 
 def list_all():

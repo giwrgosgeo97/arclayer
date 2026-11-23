@@ -8,10 +8,10 @@ import math
 import re
 
 import numpy as np
+import shapely
 from shapely.geometry import LineString
-from shapely.prepared import prep
 
-from .slicer import WALLS
+from .slicer import WALLS, _pool
 from . import mmu
 
 # Orca / Bambu Studio feature names, so Bambu Studio's G-code viewer colours them the same way
@@ -144,6 +144,7 @@ class GcodeWriter:
         self.fan = None
         self._warned = set()
         self.reprime = None
+        self.plan = None           # the next travel, worked out beforehand with the whole layer (see plan_layer)
 
     def emit(self, line):
         self.lines.append(line)
@@ -156,7 +157,7 @@ class GcodeWriter:
                 self.pa = float(m.group(2))
 
     def _move(self, p, f, e=None):
-        x, y, z = p
+        x, y, z = map(float, p)
         cmd = f"G1 X{x:.3f} Y{y:.3f}"
         if self.pos is None or abs(z - self.pos[2]) > 5e-4:
             cmd += f" Z{z:.3f}"
@@ -165,10 +166,9 @@ class GcodeWriter:
             self.max_z = max(self.max_z, z)
         cmd += f" F{f * 60:.0f}"
         self.emit(cmd)
-        p = np.array(p, float)
         if self.pos is not None:
-            self.time += np.linalg.norm(p - self.pos) / max(f, 1e-3)
-        self.pos = p
+            self.time += math.dist((x, y, z), self.pos) / max(f, 1e-3)
+        self.pos = np.array((x, y, z))
 
     def set_accel(self, a):
         if self.s.default_acceleration <= 0:
@@ -284,7 +284,12 @@ class GcodeWriter:
         if lift and ((s.retract_lift_above > 0 and z_now < s.retract_lift_above) or
                      (s.retract_lift_below > 0 and z_now > s.retract_lift_below)):
             lift = 0.0
-        pts = self._travel_line(self.pos[:2].astype(float), np.asarray(tgt[:2], float), zp + lift)
+        plan = self.plan
+        if (plan is not None and plan[0] == zp + lift and abs(plan[1] - self.pos[0]) < 1e-9
+                and abs(plan[2] - self.pos[1]) < 1e-9):
+            pts = plan[3]
+        else:
+            pts = self._travel_line(self.pos[:2].astype(float), np.asarray(tgt[:2], float), zp + lift)
         # never dip below the current position while leaving (protects what we just printed)
         pts[0, 2] = max(pts[0, 2], self.pos[2] + lift)
         if lift:
@@ -310,30 +315,117 @@ class GcodeWriter:
         th_list = np.split(thick, np.cumsum([len(q) - 1 for q in pts_list])[:-1])
         return list(zip(pts_list, th_list))
 
+    def plan_layer(self, paths, prepared, zp, allow):
+        """Everything about a layer that doesn't depend on the writer's state, worked out for all its paths
+        together (much faster than path by path): seam gaps, line lengths and cross-sections, and the travel
+        moves between the paths. Returns per path (pts, thick, seg, length, area, mean area), and per path its
+        travel plan (travel() works a travel out itself when things turned out differently)."""
+        s = self.s
+        pre = []
+        for p, (pts, thick) in zip(paths, prepared):
+            if p.closed and p.kind in WALLS and s.seam_gap > 0:
+                pts, thick = _trim_end(pts, thick, s.seam_gap / 100.0 * s.nozzle_diameter)
+            pre.append((pts, thick))
+        n = len(pre)
+        if not n:
+            return [], []
+        cnt = np.array([len(th) for _, th in pre])
+        ends = np.cumsum(cnt)
+        starts = ends - cnt
+        d = np.vstack([q[1:] - q[:-1] for q, _ in pre])
+        seg = np.sqrt((d * d).sum(1))
+        thick = np.clip(np.concatenate([th for _, th in pre]), 0.04, s.nozzle_diameter * 0.8)
+        w = np.repeat([p.width for p in paths], cnt)
+        area = thick * (w - thick * (1 - math.pi / 4))             # Orca's rounded-rectangle model
+        if s.thick_bridges:
+            br = np.repeat([p.kind == "bridge" for p in paths], cnt)
+            if br.any():
+                area[br] = math.pi * (w[br] / 2) ** 2              # round strand in the air
+        length = np.add.reduceat(seg, starts).tolist()
+        mean = (np.add.reduceat(area, starts) / cnt).tolist()
+        starts, ends = starts.tolist(), ends.tolist()
+        out = [(q, thick[a:b], seg[a:b], ln, area[a:b], m)
+               for (q, _), a, b, ln, m in zip(pre, starts, ends, length, mean)]
+        # travels: from the end of each path (after the wipe, if it retracts there) to the start of the next
+        plans = [None] * n
+        todo, A, B, Z = [], [], [], []
+        for k, p in enumerate(paths):
+            if k == 0:
+                if self.pos is None or p.tool != self.tool:
+                    continue
+                cur, last, retracted = self.pos.tolist(), None, self.retracted
+            else:
+                if p.tool != paths[k - 1].tool or p.gcode:
+                    continue
+                last = out[k - 1][0]
+                cur, retracted = last[-1].tolist(), False
+            ts = self.ts[p.tool] if 0 <= p.tool < len(self.ts) else s
+            tgt = out[k][0][0].tolist()
+            dist = math.hypot(tgt[0] - cur[0], tgt[1] - cur[1])
+            if dist < 1e-3:
+                continue
+            lift = 0.0
+            if dist >= ts.retract_min_travel and allow[k]:
+                if (last is not None and not retracted and ts.retract_length > 0 and ts.wipe and ts.wipe_distance > 0
+                        and len(last) > 1):
+                    cur = _wipe_end(last, ts.wipe_distance)
+                lift = ts.travel_lift
+                if lift and ((ts.retract_lift_above > 0 and cur[2] < ts.retract_lift_above) or
+                             (ts.retract_lift_below > 0 and cur[2] > ts.retract_lift_below)):
+                    lift = 0.0
+            todo.append(k)
+            A.append(cur[:2])
+            B.append(tgt[:2])
+            Z.append(zp + lift)
+        if todo:
+            for k, a, z, pts in zip(todo, A, Z, self._travel_lines(np.array(A), np.array(B), np.array(Z))):
+                plans[k] = (z, a[0], a[1], pts)
+        return out, plans
+
+    def _travel_lines(self, a, b, zp, tol=0.05, step=1.0):
+        """_travel_line for many travels at once (one transform call for all of them)."""
+        d = np.hypot(b[:, 0] - a[:, 0], b[:, 1] - a[:, 1])
+        n = np.maximum(1, np.ceil(d / step)).astype(int)
+        cnt = n + 1
+        line = np.repeat(np.arange(len(n)), cnt)
+        first = np.cumsum(cnt) - cnt
+        k = np.arange(len(line)) - first[line]
+        u = k / n[line]
+        xy = a[line] + (b - a)[line] * u[:, None]
+        z = self.tf.inverse(xy[:, 0], xy[:, 1], zp[line])
+        keep = np.ones(len(line), bool)
+        many = n > 2
+        if many.any():
+            m = many[line]
+            keep[m] = False
+            sub = np.cumsum(many) - 1
+            geoms = shapely.simplify(
+                shapely.linestrings(np.column_stack([u[m] * d[line[m]], z[m]]), indices=sub[line[m]]),
+                tol, preserve_topology=False)
+            co, gi = shapely.get_coordinates(geoms, return_index=True)
+            src = np.flatnonzero(many)[gi]
+            idx = np.clip(np.rint(co[:, 0] / d[src] * n[src]).astype(int), 0, n[src])
+            keep[first[src] + idx] = True
+        pts = np.column_stack([xy, z])[keep]
+        cut = np.cumsum(np.bincount(line[keep], minlength=len(n)))[:-1]
+        return np.split(pts, cut)
+
     def extrude_path(self, path, zp, h, speed, allow_retract=True, pre=None):
         s = self.s
         if pre is None:
-            pre = self.prepare_layer([path], zp, h)[0]
-        pts, thick = pre
-        if path.closed and path.kind in WALLS and s.seam_gap > 0:
-            pts, thick = _trim_end(pts, thick, s.seam_gap / 100.0 * s.nozzle_diameter)
+            pre = self.plan_layer([path], self.prepare_layer([path], zp, h), zp, [True])[0][0]
+            self.plan = None
+        pts, thick, seg, length, area, mean_area = pre
         t0 = self.time
         self.travel(pts[0, :2], zp, allow_retract, tgt=pts[0])
         self.unretract()
         t1 = self.time
         self.time_by_kind["travel"] = self.time_by_kind.get("travel", 0.0) + (t1 - t0)
-        thick = np.clip(thick, 0.04, s.nozzle_diameter * 0.8)
-        self.min_t = min(self.min_t, thick.min())
-        self.max_t = max(self.max_t, thick.max())
+        self.min_t = min(self.min_t, float(thick.min()))
+        self.max_t = max(self.max_t, float(thick.max()))
         w = path.width
-        if path.kind == "bridge" and s.thick_bridges:
-            area = np.full_like(thick, math.pi * (w / 2) ** 2)     # round strand in the air
-        else:
-            area = thick * (w - thick * (1 - math.pi / 4))         # Orca's rounded-rectangle model
-        seg = np.linalg.norm(pts[1:] - pts[:-1], axis=1)
-        length = float(seg.sum())
         if s.max_volumetric_speed > 0:
-            cap = s.max_volumetric_speed / float(area.mean())
+            cap = s.max_volumetric_speed / mean_area
             if cap < speed:
                 self.mvs_extra += length / max(cap, 1e-3) - length / max(speed, 1e-3)
                 speed = cap
@@ -343,20 +435,22 @@ class GcodeWriter:
                                   s.bottom_surface_flow_ratio if path.kind == "bottom_surface" else 1.0)
         if self.layer_n == 0:
             k *= s.first_layer_flow_ratio
-        e = s.flow * k * path.flow * area * seg / self.fil_area
-        self._extrude_moves(pts, speed, e)
+        e = (s.flow * k * path.flow / self.fil_area) * area * seg
+        self._extrude_moves(pts, speed, e, length)
         self.time_by_kind[path.kind] = self.time_by_kind.get(path.kind, 0.0) + (self.time - t1)
         self.e_by_tool[self.tool or 0] += float(e.sum())
         self.preview[-1].append((path.kind, pts))
         self.preview_tools[-1].append(self.tool or 0)
         self.preview_speeds[-1].append(float(speed))
-        self.preview_attrs[-1].append((float(w), float(speed * area.mean()), 100.0 * (self.fan or 0) / 255,
+        self.preview_attrs[-1].append((float(w), float(speed * mean_area), 100.0 * (self.fan or 0) / 255,
                                        float(self.temp or s.nozzle_temp), float(self.accel or 0), float(self.pa)))
         self.preview_thick[-1].append(np.append(thick, thick[-1]).astype(np.float32))
         self.last_pts = pts
 
-    def _extrude_moves(self, pts, speed, e):
+    def _extrude_moves(self, pts, speed, e, length=None):
         """Many G1 extrusion moves at one speed (the inner loop of the writer, kept lean)."""
+        if length is None:
+            length = float(np.linalg.norm(pts[1:] - pts[:-1], axis=1).sum())
         f = f" F{speed * 60:.0f}"
         z0 = self.pos[2] if self.pos is not None else None
         lines = self.lines
@@ -366,8 +460,7 @@ class GcodeWriter:
                 z0 = z
             else:
                 lines.append(f"G1 X{x:.3f} Y{y:.3f} E{de:.5f}{f}")
-        seg = np.linalg.norm(pts[1:] - pts[:-1], axis=1)
-        self.time += float(seg.sum()) / max(speed, 1e-3)
+        self.time += length / max(speed, 1e-3)
         self.e_total += float(e.sum())
         self.max_z = max(self.max_z, float(pts[1:, 2].max()))
         self.pos = np.array(pts[-1], float)
@@ -480,17 +573,41 @@ def _trim_end(pts, thick, gap):
     return np.vstack([pts[:k], end]), thick[:k]
 
 
+def _wipe_end(pts, todo):
+    """Where a wipe of `todo` mm back along a path ends (the same walk as GcodeWriter.retract)."""
+    end = pts[-1].tolist()
+    for k in range(len(pts) - 1, 0, -1):
+        a, b = pts[k].tolist(), pts[k - 1].tolist()
+        d = math.dist(a, b)
+        if d < 1e-6:
+            continue
+        if d > todo:
+            return [x + (y - x) * (todo / d) for x, y in zip(a, b)]
+        end = b
+        todo -= d
+        if todo <= 1e-6:
+            break
+    return end
+
+
 def _layer_time(L, s, n):
     """Rough print time of a layer, for cooling decisions."""
     t, pos = 0.0, None
-    for p in L.paths:
-        length = float(np.linalg.norm(np.diff(p.pts, axis=0), axis=1).sum())
+    if not L.paths:
+        return t
+    cnt = np.array([len(p.pts) for p in L.paths])
+    allp = np.vstack([p.pts for p in L.paths])
+    seg = np.append(np.hypot(*np.diff(allp, axis=0).T), 0.0)
+    ends = np.cumsum(cnt)
+    seg[ends - 1] = 0.0                               # not from one path into the next
+    lengths = np.add.reduceat(seg, ends - cnt).tolist()
+    for p, length in zip(L.paths, lengths):
         sp = _feature_speed(p, s, n)
         if s.max_volumetric_speed > 0:
             sp = min(sp, s.max_volumetric_speed / (L.thickness * p.width))
         t += length / max(sp, 1e-3)
         if pos is not None:
-            t += float(np.linalg.norm(p.pts[0] - pos)) / s.travel_speed
+            t += math.dist(p.pts[0], pos) / s.travel_speed
         pos = p.pts[-1]
     return t
 
@@ -515,12 +632,19 @@ def initial_tool(start_text):
     return found
 
 
+def bend_layers(layers, s, tf):
+    """The printed layers bent back to real space (GcodeWriter.prepare_layer for each), on all cores."""
+    w = GcodeWriter(s, tf)
+    return list(_pool().map(lambda L: w.prepare_layer(L.paths, L.zp, L.thickness), [L for L in layers if L.paths]))
+
+
 def write_gcode(layers, s, tf, start=None, end=None, log=print, progress=None,
-                tool_settings=None, filaments=None, change_gcode=None, calib=None, objects=None):
+                tool_settings=None, filaments=None, change_gcode=None, calib=None, objects=None, bent=None):
     """Returns (gcode_text, preview, stats). tool_settings / filaments: one per filament slot
     (Settings, and {"type", "color"}); change_gcode: the filament-change macro.
     calib: a nonplanar.calibration.Calib whose hooks change settings by height or block.
-    objects: print by object: [(layers, transform)] in print order, each finished before the next starts."""
+    objects: print by object: [(layers, transform)] in print order, each finished before the next starts.
+    bent: bend_layers(layers, ...), when the caller has it already."""
     if objects:
         layers = [L for lay, _ in objects for L in lay]
         tf = objects[0][1]
@@ -676,15 +800,25 @@ def write_gcode(layers, s, tf, start=None, end=None, log=print, progress=None,
         w.preview_attrs.append([])
         w.preview_thick.append([])
         t_start = w.time
-        infill_area = prep(L.infill_area) if (s.reduce_infill_retraction and L.infill_area is not None) else None
         prev = None
-        prepared = w.prepare_layer(L.paths, L.zp, L.thickness)
+        prepared = bent[n] if bent is not None else w.prepare_layer(L.paths, L.zp, L.thickness)
         changes_here = 0
         if tower is not None:
             tower.begin_layer(n, min(float(q[:, 2].min()) for q, _ in prepared) if prepared else L.zp,
                               L.thickness, s.nozzle_diameter)
             tower.layer_start(w, n, L.zp, L.thickness)
-        for p, pre in zip(L.paths, prepared):
+        # no retraction for travels that stay inside the infill
+        allow_all = [True] * len(L.paths)
+        if L.infill_area is not None and s.reduce_infill_retraction:
+            ks = [k for k in range(1, len(L.paths)) if L.paths[k].kind == "infill" and L.paths[k - 1].kind == "infill"
+                  and L.paths[k].tool == L.paths[k - 1].tool]
+            if ks:
+                shapely.prepare(L.infill_area)
+                hops = shapely.linestrings(np.array([[L.paths[k - 1].pts[-1], L.paths[k].pts[0]] for k in ks]))
+                for k, inside in zip(ks, shapely.contains(L.infill_area, hops).tolist()):
+                    allow_all[k] = not inside
+        pres, plans = w.plan_layer(L.paths, prepared, L.zp, allow_all)
+        for p, pre, plan, allow in zip(L.paths, pres, plans, allow_all):
             if p.tool != w.tool:
                 w.change_tool(p.tool, change_gcode, filaments, n + 1, L.zp, tuple(w.lift_to(p.pts[:1], L.zp)[0]), log)
                 if tower is not None:
@@ -717,9 +851,7 @@ def write_gcode(layers, s, tf, start=None, end=None, log=print, progress=None,
             w.set_accel(_accel(p.kind, s, nl))
             w.set_jerk(_jerk(p.kind, s, nl))
             w.set_fan(base_fan if (p.fan is None or nl < w.s.close_fan_first_layers) else max(base_fan, p.fan))
-            allow = True
-            if infill_area is not None and prev is not None and p.kind == "infill" and prev.kind == "infill":
-                allow = not infill_area.contains(LineString([prev.pts[-1], p.pts[0]]))
+            w.plan = plan
             w.extrude_path(p, L.zp, L.thickness, sp, allow, pre=pre)
             prev = p
         if s.retract_when_changing_layer:

@@ -21,7 +21,7 @@ import numpy as np
 import trimesh
 
 from nonplanar.slicer import load_parts, slice_model, placement_matrix
-from nonplanar.gcode import write_gcode
+from nonplanar.gcode import write_gcode, bend_layers
 from nonplanar.collision import check, safe_angle
 from nonplanar.config import Settings
 from nonplanar.threemf import load_3mf_parts
@@ -63,6 +63,33 @@ for d in (WORK, OUTPUT, TEMPLATES):
 
 def _b64(a):
     return base64.b64encode(np.ascontiguousarray(a).tobytes()).decode()
+
+
+BIN = "application/x-arclayer"
+
+
+def _pack(obj):
+    """JSON, or (when it holds numpy arrays) a binary answer: header length, JSON header, the arrays' bytes.
+    Saves turning millions of numbers into text and back (app.js: api())."""
+    bufs, size = [], 0
+
+    def arr(a):
+        nonlocal size
+        if isinstance(a, np.generic):
+            return a.item()
+        if not isinstance(a, np.ndarray):
+            raise TypeError(f"can't send {type(a)}")
+        b = np.ascontiguousarray(a).tobytes()
+        at = size
+        bufs.append(b + bytes(-len(b) % 8))
+        size += len(bufs[-1])
+        return {"$bin": [at, len(b)]}
+
+    head = json.dumps(obj, default=arr).encode()
+    if not bufs:
+        return head, "application/json"
+    head += b" " * (-(len(head) + 4) % 8)                  # the arrays start on a multiple of 8 bytes
+    return b"".join([len(head).to_bytes(4, "little"), head, *bufs]), BIN
 
 
 def _clean_name(name):
@@ -156,7 +183,7 @@ def _use_parts(parts, shown, path=None):
             "size": mesh.extents.round(2).tolist(),
             "parts": [{"name": base if len(parts) == 1 else (m.metadata.get("name") or f"Part {k + 1}"),
                        "faces": int(len(m.faces)),
-                       "tris": _b64(m.triangles.astype(np.float32).reshape(-1, 3))} for k, m in enumerate(parts)]}
+                       "tris": m.triangles.astype(np.float32).reshape(-1, 3)} for k, m in enumerate(parts)]}
 
 
 def arrange_model(req):
@@ -197,7 +224,7 @@ def arrange_model(req):
         text += f". Parts that touch stay together ({len(S.parts)} parts in {n} groups)"
     return {"text": text, "gap": r["gap"], "groups": r["groups"], "faces": int(len(mesh.faces)),
             "size": mesh.extents.round(2).tolist(),
-            "parts": [{"faces": int(len(m.faces)), "tris": _b64(m.triangles.astype(np.float32).reshape(-1, 3))}
+            "parts": [{"faces": int(len(m.faces)), "tris": m.triangles.astype(np.float32).reshape(-1, 3)}
                       for m in S.parts]}
 
 
@@ -222,7 +249,7 @@ def refine_model(cap=1_500_000):
     S.result = None
     after = sum(len(m.faces) for m in parts)
     return {"changed": after != before, "faces": int(after),
-            "parts": [{"faces": int(len(m.faces)), "tris": _b64(m.triangles.astype(np.float32).reshape(-1, 3))}
+            "parts": [{"faces": int(len(m.faces)), "tris": m.triangles.astype(np.float32).reshape(-1, 3)}
                       for m in parts]}
 
 
@@ -610,6 +637,19 @@ def run_slice(req):
         if by_object and req.get("paint"):
             _job_log("WARNING: painted supports are not used when printing by object")
         seq_warn, order = [], []
+
+        def again(surface, cur):
+            if surface:
+                _job_log(f"Collision found: re-slicing with the top surface smoothed to {cur - 3:.0f}°")
+                _job_progress(0.05, f"Collision: smoothing the top to {cur - 3:.0f}°")
+                for ts in tool_settings:
+                    ts.surface_max_angle = cur - 3
+                return
+            new = s.cone_angle - math.copysign(1.0, s.cone_angle)
+            _job_log(f"Collision found at {s.cone_angle:+.1f} deg: re-slicing at {new:+.1f} deg")
+            _job_progress(0.05, f"Collision: re-slicing at {new:.1f}°")
+            _set_angle(tool_settings, new)
+
         for attempt in range(4):
             objects = None
             if cal is not None:
@@ -632,9 +672,21 @@ def run_slice(req):
                 mesh, tf, layers = slice_model(S.mesh, s, log=_job_log, progress=_job_progress, placement=placement,
                                                parts=S.parts, part_tools=part_tools, tool_changes=changes,
                                                paint=req.get("paint"))
+            # a collision that will be re-sliced anyway: found before the G-code is written
+            bent = early = None
+            cur = (s.surface_max_angle if s.surface_max_angle > 0 else limit) if surface else 0
+            can_retry = auto and attempt < 3 and (cur > 6 if surface else abs(s.cone_angle) >= 1.5)
+            if cal is None and not objects:
+                _job_progress(0.62, "Checking toolhead collisions")
+                bent = bend_layers(layers, s, tf)
+                early = check([[(p.kind, q) for p, (q, _) in zip(L.paths, pre)]
+                               for L, pre in zip([L for L in layers if L.paths], bent)], s, log=lambda m: None)
+                if can_retry and early["hits"]:
+                    again(surface, cur)
+                    continue
             text, preview, stats = write_gcode(layers, s, tf, start, end, log=_job_log, progress=_job_progress,
                                                tool_settings=tool_settings, filaments=filaments, change_gcode=change,
-                                               calib=cal, objects=objects)
+                                               calib=cal, objects=objects, bent=bent)
             if builtin:
                 text = _render_builtin(text, builtin, preview, stats["preview_tools"], tool_settings, filaments, plate,
                                        printer, {"printer": req["printer"], "process": pname, "filament": slots[0]["preset"]})
@@ -651,23 +703,14 @@ def run_slice(req):
                     start_n += cnt
                 _job_log(f"WARNING: possible head collision at {coll['hits']} points" if coll["hits"]
                          else "Collision check: OK (each object, with the configured head geometry)")
+            elif early is not None and not early["hits"] and sum(map(len, preview)) == sum(map(len, bent)):
+                coll = early                 # the same lines (no prime tower): checked already
+                _job_log("Collision check: OK (with the configured head geometry)")
             else:
                 coll = check(preview, s, log=_job_log)
-            if surface:
-                cur = s.surface_max_angle if s.surface_max_angle > 0 else limit
-                if not (auto and coll["hits"]) or attempt == 3 or cur <= 6:
-                    break
-                _job_log(f"Collision found: re-slicing with the top surface smoothed to {cur - 3:.0f}°")
-                _job_progress(0.05, f"Collision: smoothing the top to {cur - 3:.0f}°")
-                for ts in tool_settings:
-                    ts.surface_max_angle = cur - 3
-                continue
-            if not (auto and coll["hits"]) or attempt == 3 or abs(s.cone_angle) < 1.5:
+            if not (can_retry and coll["hits"]):
                 break
-            new = s.cone_angle - math.copysign(1.0, s.cone_angle)
-            _job_log(f"Collision found at {s.cone_angle:+.1f} deg: re-slicing at {new:+.1f} deg")
-            _job_progress(0.05, f"Collision: re-slicing at {new:.1f}°")
-            _set_angle(tool_settings, new)
+            again(surface, cur)
         coll["sequence"] = seq_warn                      # print by object: objects too close / too tall
         coll["order"] = order
         coll["angle_requested"] = requested
@@ -729,42 +772,43 @@ ATTRS = (("width", 1000), ("flow", 100), ("fan", 1), ("temp", 1), ("accel", 1), 
 
 
 def _preview_payload(preview, ptools, s, tf, pspeeds=None, extra=None):
-    pos, kind, tool, idx, layer_end, layer_z, speed = [], [], [], [], [], [], []
     attrs, thick, ltimes = extra or (None, None, None)
-    cols = {name: [] for name, _ in ATTRS}
-    height = []
-    n = 0
-    nidx = 0
     if pspeeds is None:
         pspeeds = [[s.outer_wall_speed] * len(lay) for lay in preview]
-    for lay, tl, sl in zip(preview, ptools, pspeeds):
-        zmax = 0.0
-        for (k, pts), t, sp in zip(lay, tl, sl):
-            m = len(pts)
-            speed.append(np.full(m, min(65535, max(1, round(sp))), np.uint16))
-            pos.append(pts.astype(np.float32))
-            kind.append(np.full(m, KINDS.index(k) if k in KINDS else 0, np.uint8))
-            tool.append(np.full(m, t, np.uint8))
-            a = np.arange(n, n + m - 1, dtype=np.uint32)
-            idx.append(np.column_stack([a, a + 1]).ravel())
-            nidx += 2 * (m - 1)
-            n += m
-            zmax = max(zmax, float(pts[:, 2].max()))
-        if attrs is not None:
-            li = len(layer_end)
-            for e, (k, pts) in enumerate(lay):
-                m = len(pts)
-                for (name, sc), v in zip(ATTRS, attrs[li][e]):
-                    cols[name].append(np.full(m, min(65535, max(0, round(v * sc))), np.uint16))
-                height.append(np.clip(np.rint(thick[li][e] * 1000), 0, 65535).astype(np.uint16))
-        layer_end.append(nidx)
-        layer_z.append(round(zmax, 3))
-    return {"pos": _b64(np.vstack(pos)), "kind": _b64(np.concatenate(kind)), "tool": _b64(np.concatenate(tool)),
-            "idx": _b64(np.concatenate(idx)), "speed": _b64(np.concatenate(speed)),
+    paths = [pts for lay in preview for _, pts in lay]
+    m = np.array([len(q) for q in paths])
+    n = int(m.sum())
+    pos = np.vstack(paths).astype(np.float32)
+
+    def column(values, dtype, lo, hi):              # one value per path -> one per point
+        return np.repeat(np.clip(np.rint(np.array(values, float)), lo, hi).astype(dtype), m)
+
+    kind = column([KINDS.index(k) if k in KINDS else 0 for lay in preview for k, _ in lay], np.uint8, 0, 255)
+    tool = column([x for tl in ptools for x in tl], np.uint8, 0, 255)
+    speed = column([x for sl in pspeeds for x in sl], np.uint16, 1, 65535)
+    a = np.arange(n, dtype=np.uint32)
+    seg = np.ones(n, bool)
+    seg[np.cumsum(m) - 1] = False                   # no line from one path to the next
+    a = a[seg]
+    idx = np.column_stack([a, a + 1]).ravel()
+    per_layer = np.array([len(lay) for lay in preview])
+    last = np.cumsum(per_layer)
+    layer_end = [int(x) for x in np.concatenate([[0], np.cumsum(2 * (m - 1))])[last]]
+    point_end = np.concatenate([[0], np.cumsum(m)])
+    layer_z = []
+    for k, e in enumerate(last.tolist()):
+        a0, a1 = point_end[e - per_layer[k]], point_end[e]
+        layer_z.append(round(float(pos[a0:a1, 2].max()), 3) if a1 > a0 else 0.0)
+    cols, height = {}, None
+    if attrs is not None:
+        flat = [x for at in attrs for x in at]
+        for j, (name, sc) in enumerate(ATTRS):
+            cols[name] = column([x[j] * sc for x in flat], np.uint16, 0, 65535)
+        height = np.clip(np.rint(np.concatenate([x for th in thick for x in th]) * 1000), 0, 65535).astype(np.uint16)
+    return {"pos": pos, "kind": kind, "tool": tool, "idx": idx, "speed": speed,
             "travel_speed": float(s.travel_speed),
-            **({"attrs": {name: _b64(np.concatenate(cols[name])) for name, _ in ATTRS},
-                "attr_scale": dict(ATTRS), "height": _b64(np.concatenate(height)),
-                "layer_time": [round(float(t), 2) for t in ltimes]} if attrs is not None and height else {}),
+            **({"attrs": cols, "attr_scale": dict(ATTRS), "height": height,
+                "layer_time": [round(float(t), 2) for t in ltimes]} if attrs is not None and n else {}),
             "layers": layer_end, "layer_z": layer_z, "kinds": KINDS,
             "cone": {"cx": tf.cx, "cy": tf.cy, "angle": tf.angle, "ramp": tf.H}}
 
@@ -920,7 +964,7 @@ def _save_live(name):
                 "stats": {k: v for k, v in S.result["stats"].items()}, "collision": S.result.get("collision") or {}}
         tmp = LIVE_FILE + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(live, f)
+            json.dump(live, f, default=_b64)
         os.replace(tmp, LIVE_FILE)
     except Exception as e:                          # the live view is a nice extra, never a reason to fail a print
         print("live view:", e)
@@ -957,7 +1001,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _send(self, code, body, ctype="application/json"):
         if not isinstance(body, (bytes, bytearray)):
-            body = json.dumps(body).encode()
+            body, ctype = _pack(body)
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
